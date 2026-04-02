@@ -79,3 +79,4 @@ O que já existe na base de código vs. o backlog do produto está em [reference
 
 - Fluxos detalhados (cadastro em etapas, salas, atividades, notificações, monetização futura): leia [reference.md](reference.md).
 - Para implementar uma tela específica, cruze a rota acima com a seção correspondente em `reference.md`.
+- **Git (branch por demanda, commits com prefixo, máx. 120 caracteres):** [educonnect-git-workflow/SKILL.md](../educonnect-git-workflow/SKILL.md).
