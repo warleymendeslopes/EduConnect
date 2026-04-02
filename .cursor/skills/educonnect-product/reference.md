@@ -11,6 +11,7 @@ Síntese do que **já está no código** (workspace `/Volumes/warley/edu`) frent
 - **Next.js (App Router)** + **Supabase Auth** (`@supabase/ssr`, `lib/supabase/client` e middleware em `lib/supabase/middleware.ts`).
 - **Middleware:** protege `/dashboard/*` (redireciona para `/login` se não houver sessão); usuários logados em `/login` ou `/cadastro` vão para o dashboard conforme `user_metadata.user_type` (fallback `aluno`).
 - **Tabela `public.profiles`:** script em `scripts/001_create_profiles.sql` — campos principais `full_name`, `user_type` (`aluno` \| `professor`), `avatar_url`, `bio`, `interesses` (`interests` como `text[]`), RLS, trigger `on_auth_user_created` preenchendo perfil a partir de `raw_user_meta_data`.
+- **Salas:** `scripts/002_classrooms.sql` — `classrooms`, `classroom_members`, RLS (sem recursao), RPCs `get_classroom_by_invite_code` e `join_classroom_by_invite`; rodar após o `001`.
 - **Fluxos:** `/login` (redirect por `profiles.user_type`), `/cadastro` (fluxo em etapas aluno/professor + metadata), `/cadastro/onboarding`, `/auth/callback`, `/auth/error`.
 - **Logout:** `signOut` nos layouts `dashboard/aluno` e `dashboard/professor`.
 

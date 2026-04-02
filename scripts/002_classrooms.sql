@@ -1,5 +1,8 @@
 -- Salas de aula e matrículas (EduConnect)
--- Aplicar no Supabase SQL Editor ou via supabase db push
+-- Ordem: aplicar scripts/001_create_profiles.sql primeiro (uma vez por projeto).
+-- Este ficheiro: Supabase → SQL Editor → colar tudo e Run.
+-- Se ja existir schema antigo em conflito, apague antes classroom_members, classrooms
+-- e as funcoes/politicas deste modulo, ou use um projeto limpo.
 
 create table if not exists public.classrooms (
   id uuid primary key default gen_random_uuid(),
@@ -31,15 +34,44 @@ create index if not exists idx_classroom_members_student on public.classroom_mem
 alter table public.classrooms enable row level security;
 alter table public.classroom_members enable row level security;
 
+-- Evita recursao infinita RLS: policies nao podem cruzar select em classrooms <-> classroom_members
+-- sem estas funcoes (SECURITY DEFINER ignora RLS nas tabelas lidas).
+
+create or replace function public.is_classroom_member(p_classroom_id uuid, p_user_id uuid)
+returns boolean
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select exists (
+    select 1 from public.classroom_members cm
+    where cm.classroom_id = p_classroom_id and cm.student_id = p_user_id
+  );
+$$;
+
+create or replace function public.is_classroom_professor(p_classroom_id uuid, p_user_id uuid)
+returns boolean
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select exists (
+    select 1 from public.classrooms c
+    where c.id = p_classroom_id and c.professor_id = p_user_id
+  );
+$$;
+
+grant execute on function public.is_classroom_member(uuid, uuid) to authenticated;
+grant execute on function public.is_classroom_professor(uuid, uuid) to authenticated;
+
 -- Professores: CRUD próprias salas
 create policy "classrooms_select_own_or_member"
   on public.classrooms for select
   using (
     professor_id = auth.uid()
-    or exists (
-      select 1 from public.classroom_members m
-      where m.classroom_id = classrooms.id and m.student_id = auth.uid()
-    )
+    or public.is_classroom_member(id, auth.uid())
   );
 
 create policy "classrooms_insert_professor"
@@ -65,22 +97,14 @@ create policy "classroom_members_select"
   on public.classroom_members for select
   using (
     student_id = auth.uid()
-    or exists (
-      select 1 from public.classrooms c
-      where c.id = classroom_members.classroom_id and c.professor_id = auth.uid()
-    )
+    or public.is_classroom_professor(classroom_id, auth.uid())
   );
 
 -- Sem insert direto por clientes: apenas via função join_classroom_by_invite (security definer)
 
 create policy "classroom_members_delete_professor"
   on public.classroom_members for delete
-  using (
-    exists (
-      select 1 from public.classrooms c
-      where c.id = classroom_id and c.professor_id = auth.uid()
-    )
-  );
+  using (public.is_classroom_professor(classroom_id, auth.uid()));
 
 create policy "classroom_members_delete_self"
   on public.classroom_members for delete
