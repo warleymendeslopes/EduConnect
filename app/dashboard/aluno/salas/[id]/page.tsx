@@ -3,9 +3,10 @@ import { getClassroomForStudent } from "@/app/actions/classrooms"
 import { listActivitiesForClassroomAsStudent } from "@/app/actions/classroom-activities"
 import { listMaterialsForClassroomAsStudent } from "@/app/actions/classroom-materials"
 import { getMySubmissionGradesForClassroom } from "@/app/actions/activity-submissions"
+import { getMyPerformanceInClassroom } from "@/app/actions/classroom-performance"
 import { AlunoSalaTabs } from "@/components/dashboard/aluno-sala-tabs"
 
-const VALID_TABS = new Set(["visao", "atividades", "materiais"])
+const VALID_TABS = new Set(["visao", "atividades", "materiais", "desempenho"])
 
 export default async function AlunoSalaDetalhePage({
   params,
@@ -18,7 +19,7 @@ export default async function AlunoSalaDetalhePage({
   const { tab } = await searchParams
   const defaultTab =
     tab && VALID_TABS.has(tab)
-      ? (tab as "visao" | "atividades" | "materiais")
+      ? (tab as "visao" | "atividades" | "materiais" | "desempenho")
       : "visao"
 
   const result = await getClassroomForStudent(id)
@@ -29,10 +30,12 @@ export default async function AlunoSalaDetalhePage({
     { rows: activities, error: activitiesError },
     { rows: materials, error: materialsError },
     { byActivity: submissionGradesByActivity },
+    studentPerformance,
   ] = await Promise.all([
     listActivitiesForClassroomAsStudent(id),
     listMaterialsForClassroomAsStudent(id),
     getMySubmissionGradesForClassroom(id),
+    getMyPerformanceInClassroom(id),
   ])
 
   return (
@@ -44,6 +47,7 @@ export default async function AlunoSalaDetalhePage({
       materialsError={materialsError}
       defaultTab={defaultTab}
       submissionGradesByActivity={submissionGradesByActivity}
+      studentPerformance={studentPerformance}
     />
   )
 }

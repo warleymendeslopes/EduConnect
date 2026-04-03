@@ -15,16 +15,17 @@ import {
   Plus,
   Trash2,
   Pencil,
-  AlertCircle,
 } from "lucide-react"
 import { format } from "date-fns"
 import { ptBR } from "date-fns/locale"
 import type { ClassroomRow } from "@/lib/classrooms/types"
 import type { ClassroomActivityRow } from "@/lib/activities/types"
 import { ACTIVITY_TYPE_LABELS } from "@/lib/activities/types"
+import type { ClassroomPerformanceForProfessor } from "@/lib/classrooms/performance"
 import type { ClassroomMaterialRow } from "@/lib/materials/types"
 import { MATERIAL_STATUS_LABELS } from "@/lib/materials/types"
 import { ShareInviteButton } from "@/components/dashboard/share-invite-button"
+import { ClassroomPerformancePanel } from "@/components/dashboard/classroom-performance-panel"
 import { ClassroomMuralEditor } from "@/components/dashboard/classroom-mural-editor"
 import { ActivitySubmissionsDialog } from "@/components/dashboard/activity-submissions-dialog"
 import { ClassroomActivityFormDialog } from "@/components/dashboard/classroom-activity-form-dialog"
@@ -58,6 +59,7 @@ type Props = {
   materials: ClassroomMaterialRow[]
   /** Contagem de provas enviadas (status enviado) por activity id */
   submissionEnvios: Record<string, number>
+  performance: ClassroomPerformanceForProfessor
 }
 
 function formatActivityWhen(iso: string | null): string {
@@ -75,6 +77,7 @@ export function ProfessorSalaDetail({
   activities,
   materials,
   submissionEnvios,
+  performance,
 }: Props) {
   const router = useRouter()
   const [activeTab, setActiveTab] = useState("alunos")
@@ -513,21 +516,10 @@ export function ProfessorSalaDetail({
         )}
 
         {activeTab === "desempenho" && (
-          <div className="p-4 sm:p-6 h-[400px] flex flex-col items-center justify-center text-center">
-            <div className="w-16 h-16 bg-blue-50 rounded-full flex items-center justify-center mb-4">
-              <BarChart className="h-8 w-8 text-[#1D4ED8]" />
-            </div>
-            <h3 className="font-display font-semibold text-xl text-gray-900 mb-2">
-              Relatorio de turma (em breve)
-            </h3>
-            <p className="text-gray-500 max-w-sm mb-6">
-              Graficos de aproveitamento apos as primeiras avaliacoes.
-            </p>
-            <Button variant="outline" className="gap-2" disabled>
-              <AlertCircle className="h-4 w-4" />
-              Notifique-me quando disponivel
-            </Button>
-          </div>
+          <ClassroomPerformancePanel
+            classroomId={classroom.id}
+            initialData={performance}
+          />
         )}
       </div>
 
