@@ -1,11 +1,53 @@
 "use server"
 
+import { del, put } from "@vercel/blob"
+import { randomUUID } from "crypto"
 import { revalidatePath } from "next/cache"
 import { createClient } from "@/lib/supabase/server"
+import {
+  effectiveContentType,
+  inferMimeFromFilename,
+  safeUploadFilename,
+} from "@/lib/activities/attachments"
 import { buildInviteCode, normalizeInviteCodeInput } from "@/lib/classrooms/invite-code"
 import type { ClassroomPreview, ClassroomRow, JoinClassroomResult } from "@/lib/classrooms/types"
 
 const MAX_CREATE_ATTEMPTS = 8
+
+const MURAL_DESCRIPTION_MAX_CHARS = 5000
+const COVER_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+
+const COVER_IMAGE_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+])
+
+function isCoverImageType(mime: string, filename: string): boolean {
+  if (mime && COVER_IMAGE_TYPES.has(mime)) return true
+  const inferred = inferMimeFromFilename(filename)
+  return inferred != null && COVER_IMAGE_TYPES.has(inferred)
+}
+
+async function assertProfessorOwnsClassroom(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  classroomId: string,
+  userId: string
+): Promise<boolean> {
+  const { data } = await supabase
+    .from("classrooms")
+    .select("id")
+    .eq("id", classroomId)
+    .eq("professor_id", userId)
+    .maybeSingle()
+  return !!data
+}
+
+function revalidateClassroomMuralPaths(classroomId: string) {
+  revalidatePath(`/dashboard/professor/salas/${classroomId}`)
+  revalidatePath(`/dashboard/aluno/salas/${classroomId}`)
+}
 
 export type CreateClassroomInput = {
   name: string
@@ -387,6 +429,162 @@ export async function removeClassroomMember(
   if (error) return { ok: false, error: error.message }
   revalidatePath(`/dashboard/professor/salas/${classroomId}`)
   revalidatePath("/dashboard/professor/salas")
+  return { ok: true }
+}
+
+export async function updateClassroomMural(
+  classroomId: string,
+  description: string
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const supabase = await createClient()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+  if (!user) return { ok: false, error: "Nao autenticado" }
+
+  const ok = await assertProfessorOwnsClassroom(supabase, classroomId, user.id)
+  if (!ok) return { ok: false, error: "Sala nao encontrada" }
+
+  const trimmed = description.trim()
+  if (trimmed.length > MURAL_DESCRIPTION_MAX_CHARS) {
+    return {
+      ok: false,
+      error: `Texto do mural: no maximo ${MURAL_DESCRIPTION_MAX_CHARS} caracteres`,
+    }
+  }
+
+  const { error } = await supabase
+    .from("classrooms")
+    .update({ description: trimmed || null })
+    .eq("id", classroomId)
+    .eq("professor_id", user.id)
+
+  if (error) return { ok: false, error: error.message }
+  revalidateClassroomMuralPaths(classroomId)
+  return { ok: true }
+}
+
+export async function uploadClassroomCover(
+  classroomId: string,
+  formData: FormData
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const token = process.env.BLOB_READ_WRITE_TOKEN
+  if (!token) {
+    return { ok: false, error: "BLOB_READ_WRITE_TOKEN nao configurado" }
+  }
+
+  const supabase = await createClient()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+  if (!user) return { ok: false, error: "Nao autenticado" }
+
+  const ownerOk = await assertProfessorOwnsClassroom(supabase, classroomId, user.id)
+  if (!ownerOk) return { ok: false, error: "Sala nao encontrada" }
+
+  const raw = formData.get("file")
+  if (!(raw instanceof File) || raw.size === 0) {
+    return { ok: false, error: "Selecione uma imagem" }
+  }
+  if (raw.size > COVER_IMAGE_MAX_BYTES) {
+    return {
+      ok: false,
+      error: `Imagem muito grande (max ${Math.round(COVER_IMAGE_MAX_BYTES / 1024 / 1024)} MB)`,
+    }
+  }
+  if (!isCoverImageType(raw.type, raw.name)) {
+    return {
+      ok: false,
+      error: "Use JPEG, PNG, GIF ou WebP",
+    }
+  }
+
+  const { data: row, error: fetchErr } = await supabase
+    .from("classrooms")
+    .select("cover_image_pathname")
+    .eq("id", classroomId)
+    .eq("professor_id", user.id)
+    .maybeSingle()
+
+  if (fetchErr || !row) return { ok: false, error: "Sala nao encontrada" }
+
+  const previousPathname =
+    typeof row.cover_image_pathname === "string" ? row.cover_image_pathname : null
+
+  const safe = safeUploadFilename(raw.name)
+  const pathname = `classroom-mural/${classroomId}/cover-${randomUUID()}-${safe}`
+  const contentType = effectiveContentType(raw)
+
+  try {
+    await put(pathname, raw, {
+      access: "private",
+      token,
+      contentType,
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Falha no upload"
+    return { ok: false, error: msg }
+  }
+
+  const { error: updateErr } = await supabase
+    .from("classrooms")
+    .update({ cover_image_pathname: pathname })
+    .eq("id", classroomId)
+    .eq("professor_id", user.id)
+
+  if (updateErr) {
+    await del(pathname, { token }).catch(() => {})
+    return { ok: false, error: updateErr.message }
+  }
+
+  if (previousPathname) {
+    await del(previousPathname, { token }).catch(() => {})
+  }
+
+  revalidateClassroomMuralPaths(classroomId)
+  return { ok: true }
+}
+
+export async function removeClassroomCover(
+  classroomId: string
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const token = process.env.BLOB_READ_WRITE_TOKEN
+  if (!token) {
+    return { ok: false, error: "BLOB_READ_WRITE_TOKEN nao configurado" }
+  }
+
+  const supabase = await createClient()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+  if (!user) return { ok: false, error: "Nao autenticado" }
+
+  const ownerOk = await assertProfessorOwnsClassroom(supabase, classroomId, user.id)
+  if (!ownerOk) return { ok: false, error: "Sala nao encontrada" }
+
+  const { data: row, error: fetchErr } = await supabase
+    .from("classrooms")
+    .select("cover_image_pathname")
+    .eq("id", classroomId)
+    .eq("professor_id", user.id)
+    .maybeSingle()
+
+  if (fetchErr || !row) return { ok: false, error: "Sala nao encontrada" }
+
+  const pathname =
+    typeof row.cover_image_pathname === "string" ? row.cover_image_pathname : null
+  if (!pathname) return { ok: true }
+
+  const { error: updateErr } = await supabase
+    .from("classrooms")
+    .update({ cover_image_pathname: null })
+    .eq("id", classroomId)
+    .eq("professor_id", user.id)
+
+  if (updateErr) return { ok: false, error: updateErr.message }
+
+  await del(pathname, { token }).catch(() => {})
+  revalidateClassroomMuralPaths(classroomId)
   return { ok: true }
 }
 

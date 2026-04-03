@@ -25,6 +25,7 @@ import { ACTIVITY_TYPE_LABELS } from "@/lib/activities/types"
 import type { ClassroomMaterialRow } from "@/lib/materials/types"
 import { MATERIAL_STATUS_LABELS } from "@/lib/materials/types"
 import { ShareInviteButton } from "@/components/dashboard/share-invite-button"
+import { ClassroomMuralEditor } from "@/components/dashboard/classroom-mural-editor"
 import { ActivitySubmissionsDialog } from "@/components/dashboard/activity-submissions-dialog"
 import { ClassroomActivityFormDialog } from "@/components/dashboard/classroom-activity-form-dialog"
 import { ClassroomMaterialFormDialog } from "@/components/dashboard/classroom-material-form-dialog"
@@ -504,10 +505,11 @@ export function ProfessorSalaDetail({
         )}
 
         {activeTab === "mural" && (
-          <div className="p-8 text-center text-gray-500 text-sm">
-            <MessageSquare className="h-10 w-10 mx-auto mb-2 text-gray-300" />
-            Mural em uma proxima versao.
-          </div>
+          <ClassroomMuralEditor
+            classroomId={classroom.id}
+            initialDescription={classroom.description}
+            initialCoverPathname={classroom.cover_image_pathname ?? null}
+          />
         )}
 
         {activeTab === "desempenho" && (

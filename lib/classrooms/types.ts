@@ -7,6 +7,8 @@ export type ClassroomRow = {
   subject: string
   education_level: string
   description: string | null
+  /** Pathname Vercel Blob da capa do mural (privado). Ausente ate aplicar script 006. */
+  cover_image_pathname?: string | null
   invite_code: string
   max_students: number | null
   status: ClassroomStatus

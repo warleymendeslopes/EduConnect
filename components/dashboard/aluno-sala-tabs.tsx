@@ -124,20 +124,23 @@ export function AlunoSalaTabs({
 
         <TabsContent value="visao" className="mt-0">
           <div className="bg-white rounded-xl border border-gray-100 p-6 sm:p-8">
+            {sala.cover_image_pathname ? (
+              <div className="mb-6 rounded-xl overflow-hidden border border-gray-100 aspect-video max-h-72 bg-gray-100">
+                {/* eslint-disable-next-line @next/next/no-img-element -- URL proxy autenticado */}
+                <img
+                  src={`/api/activity-attachment?pathname=${encodeURIComponent(sala.cover_image_pathname)}`}
+                  alt={`Capa da sala ${sala.name}`}
+                  className="w-full h-full object-cover"
+                />
+              </div>
+            ) : null}
             {sala.description?.trim() ? (
-              <p className="text-gray-700 border-t border-gray-100 pt-6 -mt-2">
-                {sala.description}
-              </p>
+              <p className="text-gray-700 whitespace-pre-wrap">{sala.description}</p>
             ) : (
-              <p className="text-gray-500 border-t border-gray-100 pt-6 -mt-2 text-sm">
+              <p className="text-gray-500 text-sm">
                 Nenhuma descricao adicionada pelo professor.
               </p>
             )}
-
-            <div className="mt-8 rounded-lg bg-gray-50 border border-gray-100 p-4 text-sm text-gray-600">
-              <p className="font-medium text-gray-900 mb-1">Em breve</p>
-              Mural desta sala sera adicionado nas proximas versoes.
-            </div>
           </div>
         </TabsContent>
 
