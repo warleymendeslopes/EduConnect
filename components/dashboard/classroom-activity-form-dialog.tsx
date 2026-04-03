@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { ActivityExamEditor } from "@/components/dashboard/activity-exam-editor"
 import { TrixActivityDescription } from "@/components/dashboard/trix-activity-description"
 import {
   Select,
@@ -41,12 +42,24 @@ import {
 } from "@/lib/activities/attachments"
 import { toast } from "sonner"
 import { Paperclip, X } from "lucide-react"
+import {
+  parseExamFromSettings,
+  totalExamPoints,
+  validateExamDefinition,
+  type ActivityExamDefinition,
+} from "@/lib/activities/exam"
 
 const TYPES: ClassroomActivityType[] = [
   "trabalho",
   "prova_objetiva",
   "lista_exercicios",
   "simulado",
+]
+
+/** Tipos em que o professor pode definir questoes (settings.exam). */
+const EXAM_TYPES: ClassroomActivityType[] = [
+  "prova_objetiva",
+  "lista_exercicios",
 ]
 
 const STATUSES: ClassroomActivityStatus[] = ["rascunho", "aberta", "encerrada"]
@@ -98,6 +111,7 @@ export function ClassroomActivityFormDialog({
   )
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
   const [descriptionEditorKey, setDescriptionEditorKey] = useState(0)
+  const [examDef, setExamDef] = useState<ActivityExamDefinition | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -113,6 +127,7 @@ export function ClassroomActivityFormDialog({
       )
       setStatus(activity.status)
       setKeptAttachments(parseActivityAttachments(activity.settings))
+      setExamDef(parseExamFromSettings(activity.settings))
     } else {
       setType("trabalho")
       setTitle("")
@@ -122,6 +137,7 @@ export function ClassroomActivityFormDialog({
       setMaxScore("")
       setStatus("aberta")
       setKeptAttachments([])
+      setExamDef(null)
     }
     setPendingFiles([])
     if (fileInputRef.current) fileInputRef.current.value = ""
@@ -161,10 +177,44 @@ export function ClassroomActivityFormDialog({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setLoading(true)
+    const examPayload =
+      EXAM_TYPES.includes(type) &&
+      examDef &&
+      examDef.questions.length > 0
+        ? examDef
+        : null
+
+    if (examPayload) {
+      const exErr = validateExamDefinition(examPayload)
+      if (exErr) {
+        setLoading(false)
+        toast.error(exErr)
+        return
+      }
+      for (const q of examPayload.questions) {
+        if (!q.prompt.trim()) {
+          setLoading(false)
+          toast.error("Preencha o enunciado de todas as questoes")
+          return
+        }
+        if (q.type === "mcq") {
+          const filled = q.options.filter((o) => o.trim().length > 0)
+          if (filled.length < 2) {
+            setLoading(false)
+            toast.error("Cada questao de multipla escolha precisa de 2 opcoes preenchidas")
+            return
+          }
+        }
+      }
+    }
+
     const max =
       maxScore.trim() === "" ? null : parseFloat(maxScore.replace(",", "."))
-    const maxFinal =
+    let maxFinal =
       max != null && !Number.isNaN(max) && max >= 0 ? max : null
+    if (examPayload) {
+      maxFinal = totalExamPoints(examPayload)
+    }
 
     let newUploaded: ActivityAttachment[] = []
     if (pendingFiles.length > 0) {
@@ -203,6 +253,7 @@ export function ClassroomActivityFormDialog({
         maxScore: maxFinal,
         status,
         attachments,
+        exam: examPayload,
       })
       setLoading(false)
       if (!res.ok) {
@@ -221,6 +272,7 @@ export function ClassroomActivityFormDialog({
         maxScore: maxFinal,
         status,
         attachments,
+        exam: examPayload,
       })
       setLoading(false)
       if (!res.ok) {
@@ -251,7 +303,11 @@ export function ClassroomActivityFormDialog({
               <Label>Tipo</Label>
               <Select
                 value={type}
-                onValueChange={(v) => setType(v as ClassroomActivityType)}
+                onValueChange={(v) => {
+                  const nt = v as ClassroomActivityType
+                  setType(nt)
+                  if (!EXAM_TYPES.includes(nt)) setExamDef(null)
+                }}
               >
                 <SelectTrigger>
                   <SelectValue />
@@ -288,6 +344,9 @@ export function ClassroomActivityFormDialog({
                 />
               ) : null}
             </div>
+            {EXAM_TYPES.includes(type) ? (
+              <ActivityExamEditor value={examDef} onChange={setExamDef} />
+            ) : null}
             <div className="grid gap-2">
               <Label htmlFor="act-files">Anexos (opcional)</Label>
               <p className="text-xs text-muted-foreground">
@@ -384,14 +443,23 @@ export function ClassroomActivityFormDialog({
             </div>
             <div className="grid gap-2">
               <Label htmlFor="act-score">Nota maxima (opcional)</Label>
-              <Input
-                id="act-score"
-                type="number"
-                min={0}
-                step={0.5}
-                value={maxScore}
-                onChange={(e) => setMaxScore(e.target.value)}
-              />
+              {examDef && examDef.questions.length > 0 ? (
+                <p className="text-sm text-gray-600">
+                  Soma dos pontos das questoes:{" "}
+                  <span className="font-semibold text-gray-900">
+                    {totalExamPoints(examDef)}
+                  </span>
+                </p>
+              ) : (
+                <Input
+                  id="act-score"
+                  type="number"
+                  min={0}
+                  step={0.5}
+                  value={maxScore}
+                  onChange={(e) => setMaxScore(e.target.value)}
+                />
+              )}
             </div>
             <div className="grid gap-2">
               <Label>Status</Label>

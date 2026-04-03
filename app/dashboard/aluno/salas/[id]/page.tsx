@@ -2,6 +2,7 @@ import { notFound } from "next/navigation"
 import { getClassroomForStudent } from "@/app/actions/classrooms"
 import { listActivitiesForClassroomAsStudent } from "@/app/actions/classroom-activities"
 import { listMaterialsForClassroomAsStudent } from "@/app/actions/classroom-materials"
+import { getMySubmissionGradesForClassroom } from "@/app/actions/activity-submissions"
 import { AlunoSalaTabs } from "@/components/dashboard/aluno-sala-tabs"
 
 const VALID_TABS = new Set(["visao", "atividades", "materiais"])
@@ -27,9 +28,11 @@ export default async function AlunoSalaDetalhePage({
   const [
     { rows: activities, error: activitiesError },
     { rows: materials, error: materialsError },
+    { byActivity: submissionGradesByActivity },
   ] = await Promise.all([
     listActivitiesForClassroomAsStudent(id),
     listMaterialsForClassroomAsStudent(id),
+    getMySubmissionGradesForClassroom(id),
   ])
 
   return (
@@ -40,6 +43,7 @@ export default async function AlunoSalaDetalhePage({
       materials={materials}
       materialsError={materialsError}
       defaultTab={defaultTab}
+      submissionGradesByActivity={submissionGradesByActivity}
     />
   )
 }

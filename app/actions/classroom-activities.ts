@@ -17,6 +17,12 @@ import {
   safeUploadFilename,
 } from "@/lib/activities/attachments"
 import { sanitizeActivityHtml } from "@/lib/sanitize-activity-html"
+import {
+  mergeActivitySettings,
+  totalExamPoints,
+  validateExamDefinition,
+  type ActivityExamDefinition,
+} from "@/lib/activities/exam"
 import type {
   ClassroomActivityRow,
   ClassroomActivityStatus,
@@ -35,6 +41,8 @@ export type CreateActivityInput = {
   maxScore: number | null
   status: ClassroomActivityStatus
   attachments?: ActivityAttachment[]
+  /** Questoes da prova (settings.exam); null ou vazio = sem prova estruturada */
+  exam?: ActivityExamDefinition | null
 }
 
 export type UpdateActivityInput = {
@@ -48,6 +56,7 @@ export type UpdateActivityInput = {
   maxScore?: number | null
   status?: ClassroomActivityStatus
   attachments?: ActivityAttachment[]
+  exam?: ActivityExamDefinition | null
 }
 
 async function assertProfessorOwnsClassroom(
@@ -310,7 +319,25 @@ export async function createActivity(
   )
   if (attachErr) return { ok: false, error: attachErr }
 
+  if (input.exam != null) {
+    const exErr = validateExamDefinition(input.exam)
+    if (exErr) return { ok: false, error: exErr }
+  }
+
   const descriptionHtml = sanitizeActivityHtml(input.description.trim() || "")
+
+  const settings = mergeActivitySettings(
+    {},
+    {
+      attachments,
+      exam: input.exam ?? null,
+    }
+  )
+
+  let maxScore = input.maxScore
+  if (input.exam && input.exam.questions.length > 0) {
+    maxScore = totalExamPoints(input.exam)
+  }
 
   const { data, error } = await supabase
     .from("classroom_activities")
@@ -321,9 +348,9 @@ export async function createActivity(
       description: descriptionHtml || null,
       starts_at: input.startsAt || null,
       due_at: input.dueAt || null,
-      max_score: input.maxScore,
+      max_score: maxScore,
       status: input.status,
-      settings: { attachments },
+      settings,
     })
     .select("id")
     .single()
@@ -365,15 +392,22 @@ export async function updateActivity(
   if (input.maxScore !== undefined) patch.max_score = input.maxScore
   if (input.status !== undefined) patch.status = input.status
 
-  if (input.attachments !== undefined) {
-    if (input.attachments.length > ACTIVITY_ATTACHMENT_MAX_PER_ACTIVITY) {
-      return { ok: false, error: "Numero de anexos acima do permitido" }
+  if (input.exam != null) {
+    const exErr = validateExamDefinition(input.exam)
+    if (exErr) return { ok: false, error: exErr }
+  }
+
+  if (input.attachments !== undefined || input.exam !== undefined) {
+    if (input.attachments !== undefined) {
+      if (input.attachments.length > ACTIVITY_ATTACHMENT_MAX_PER_ACTIVITY) {
+        return { ok: false, error: "Numero de anexos acima do permitido" }
+      }
+      const attachErr = assertAttachmentsBelongToClassroom(
+        input.attachments,
+        input.classroomId
+      )
+      if (attachErr) return { ok: false, error: attachErr }
     }
-    const attachErr = assertAttachmentsBelongToClassroom(
-      input.attachments,
-      input.classroomId
-    )
-    if (attachErr) return { ok: false, error: attachErr }
 
     const { data: row } = await supabase
       .from("classroom_activities")
@@ -385,12 +419,32 @@ export async function updateActivity(
     const old = parseActivityAttachments(
       row?.settings as Record<string, unknown> | undefined
     )
-    const newUrls = new Set(input.attachments.map((a) => a.url))
-    const removedUrls = old.filter((a) => !newUrls.has(a.url)).map((a) => a.url)
-    await deleteAttachmentBlobs(removedUrls)
+    if (input.attachments !== undefined) {
+      const newUrls = new Set(input.attachments.map((a) => a.url))
+      const removedUrls = old.filter((a) => !newUrls.has(a.url)).map((a) => a.url)
+      await deleteAttachmentBlobs(removedUrls)
+    }
 
     const current = (row?.settings as Record<string, unknown>) ?? {}
-    patch.settings = { ...current, attachments: input.attachments }
+    const settingsPatch: {
+      attachments?: ActivityAttachment[]
+      exam?: ActivityExamDefinition | null
+    } = {}
+    if (input.attachments !== undefined) {
+      settingsPatch.attachments = input.attachments
+    }
+    if (input.exam !== undefined) {
+      settingsPatch.exam = input.exam
+    }
+    patch.settings = mergeActivitySettings(current, settingsPatch)
+
+    if (input.exam !== undefined) {
+      if (input.exam && input.exam.questions.length > 0) {
+        patch.max_score = totalExamPoints(input.exam)
+      } else if (input.maxScore !== undefined) {
+        patch.max_score = input.maxScore
+      }
+    }
   }
 
   if (Object.keys(patch).length === 0) return { ok: true }

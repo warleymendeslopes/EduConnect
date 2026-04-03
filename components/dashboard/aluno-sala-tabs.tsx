@@ -5,7 +5,9 @@ import { LeaveClassroomButton } from "@/components/dashboard/leave-classroom-but
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import type { StudentSubmissionGrade } from "@/app/actions/activity-submissions"
 import { parseActivityAttachments } from "@/lib/activities/attachments"
+import { parseExamFromSettings } from "@/lib/activities/exam"
 import type { ClassroomActivityRow } from "@/lib/activities/types"
 import { ACTIVITY_TYPE_LABELS } from "@/lib/activities/types"
 import type { ClassroomRow } from "@/lib/classrooms/types"
@@ -34,6 +36,8 @@ type Props = {
   materialsError: string | null
   /** URL query `?tab=atividades` etc. */
   defaultTab?: TabValue
+  /** Notas do aluno em atividades com prova (por activity id). */
+  submissionGradesByActivity?: Record<string, StudentSubmissionGrade>
 }
 
 function formatDue(iso: string | null): string {
@@ -52,6 +56,7 @@ export function AlunoSalaTabs({
   materials,
   materialsError,
   defaultTab = "visao",
+  submissionGradesByActivity = {},
 }: Props) {
   return (
     <div className="max-w-6xl mx-auto pb-20 lg:pb-0">
@@ -147,58 +152,72 @@ export function AlunoSalaTabs({
               </p>
             ) : (
               <ul className="grid gap-3">
-                {activities.map((a) => (
-                  <li
-                    key={a.id}
-                    className="border border-gray-100 rounded-xl p-4 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-[10px] sm:text-xs font-semibold px-2 py-0.5 rounded bg-blue-50 text-[#1D4ED8] uppercase tracking-wider">
-                          {ACTIVITY_TYPE_LABELS[a.type]}
-                        </span>
-                        <Badge
-                          variant="secondary"
-                          className={
-                            a.status === "encerrada"
-                              ? "text-[10px] sm:text-xs bg-gray-100 text-gray-700"
-                              : "text-[10px] sm:text-xs bg-green-100 text-green-800"
-                          }
-                        >
-                          {a.status === "encerrada" ? "Encerrada" : "Aberta"}
-                        </Badge>
-                      </div>
-                      <h2 className="font-medium text-gray-900 text-base sm:text-lg mt-2">
-                        {a.title}
-                      </h2>
-                      <p className="text-sm text-gray-500 mt-1.5">
-                        Prazo: {formatDue(a.due_at)}
-                        {a.max_score != null && (
-                          <span className="ml-2">
-                            · Nota máx. {a.max_score}
+                {activities.map((a) => {
+                  const hasExam = !!parseExamFromSettings(a.settings)
+                  const grade = submissionGradesByActivity[a.id]
+                  const showNota =
+                    hasExam &&
+                    grade?.status === "enviado" &&
+                    grade.score_total != null
+                  return (
+                    <li
+                      key={a.id}
+                      className="border border-gray-100 rounded-xl p-4 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-[10px] sm:text-xs font-semibold px-2 py-0.5 rounded bg-blue-50 text-[#1D4ED8] uppercase tracking-wider">
+                            {ACTIVITY_TYPE_LABELS[a.type]}
                           </span>
-                        )}
-                      </p>
-                      <ActivityAttachmentsList
-                        attachments={parseActivityAttachments(a.settings)}
-                      />
-                    </div>
-                    <div className="flex flex-col gap-2 shrink-0 sm:items-end">
-                      <Button
-                        type="button"
-                        variant="default"
-                        className="bg-[#1D4ED8] hover:bg-[#1E3A8A]"
-                        asChild
-                      >
-                        <Link
-                          href={`/dashboard/aluno/salas/${sala.id}/atividades/${a.id}`}
+                          <Badge
+                            variant="secondary"
+                            className={
+                              a.status === "encerrada"
+                                ? "text-[10px] sm:text-xs bg-gray-100 text-gray-700"
+                                : "text-[10px] sm:text-xs bg-green-100 text-green-800"
+                            }
+                          >
+                            {a.status === "encerrada" ? "Encerrada" : "Aberta"}
+                          </Badge>
+                        </div>
+                        <h2 className="font-medium text-gray-900 text-base sm:text-lg mt-2">
+                          {a.title}
+                        </h2>
+                        {showNota ? (
+                          <p className="text-sm font-semibold text-[#1D4ED8] mt-1.5 tabular-nums">
+                            Sua nota: {grade?.score_total}
+                            {a.max_score != null ? ` / ${a.max_score}` : ""}
+                          </p>
+                        ) : null}
+                        <p className="text-sm text-gray-500 mt-1.5">
+                          Prazo: {formatDue(a.due_at)}
+                          {a.max_score != null && (
+                            <span className="ml-2">
+                              · Nota máx. {a.max_score}
+                            </span>
+                          )}
+                        </p>
+                        <ActivityAttachmentsList
+                          attachments={parseActivityAttachments(a.settings)}
+                        />
+                      </div>
+                      <div className="flex flex-col gap-2 shrink-0 sm:items-end">
+                        <Button
+                          type="button"
+                          variant="default"
+                          className="bg-[#1D4ED8] hover:bg-[#1E3A8A]"
+                          asChild
                         >
-                          Ver detalhes
-                        </Link>
-                      </Button>
-                    </div>
-                  </li>
-                ))}
+                          <Link
+                            href={`/dashboard/aluno/salas/${sala.id}/atividades/${a.id}`}
+                          >
+                            Ver detalhes
+                          </Link>
+                        </Button>
+                      </div>
+                    </li>
+                  )
+                })}
               </ul>
             )}
           </div>

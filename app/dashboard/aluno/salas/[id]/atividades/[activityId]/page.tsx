@@ -4,7 +4,10 @@ import { format } from "date-fns"
 import { ptBR } from "date-fns/locale"
 import { ArrowLeft } from "lucide-react"
 import { getActivityForStudent } from "@/app/actions/classroom-activities"
+import { getMySubmission } from "@/app/actions/activity-submissions"
 import { getClassroomForStudent } from "@/app/actions/classrooms"
+import { StudentActivityExam } from "@/components/dashboard/student-activity-exam"
+import { parseExamFromSettings, toPublicExam } from "@/lib/activities/exam"
 import { ActivityAttachmentsList } from "@/components/dashboard/activity-attachments-list"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -28,12 +31,29 @@ export default async function AlunoAtividadeDetalhePage({
 }) {
   const { id: classroomId, activityId } = await params
 
-  const [{ row: activity }, { row: sala }] = await Promise.all([
-    getActivityForStudent(classroomId, activityId),
-    getClassroomForStudent(classroomId),
-  ])
+  const [{ row: activity }, { row: sala }, { submission: initialSubmission }] =
+    await Promise.all([
+      getActivityForStudent(classroomId, activityId),
+      getClassroomForStudent(classroomId),
+      getMySubmission(classroomId, activityId),
+    ])
 
   if (!activity || !sala) notFound()
+
+  const examFull = parseExamFromSettings(activity.settings)
+  const examPublic = examFull ? toPublicExam(examFull) : null
+
+  /** Só após envio: índice da alternativa correta por questão MCQ (gabarito). */
+  const mcqSolutionsAfterSubmit =
+    examFull &&
+    initialSubmission?.status === "enviado" &&
+    examFull.questions.some((q) => q.type === "mcq")
+      ? Object.fromEntries(
+          examFull.questions
+            .filter((q) => q.type === "mcq")
+            .map((q) => [q.id, q.correctIndex])
+        )
+      : undefined
 
   const attachments = parseActivityAttachments(activity.settings)
   const backHref = `/dashboard/aluno/salas/${classroomId}?tab=atividades`
@@ -81,6 +101,29 @@ export default async function AlunoAtividadeDetalhePage({
           )}
         </p>
 
+        {examFull &&
+        initialSubmission?.status === "enviado" &&
+        initialSubmission.score_total != null ? (
+          <div className="mt-6 rounded-xl border border-[#1D4ED8]/25 bg-gradient-to-br from-blue-50/95 to-white px-5 py-4 shadow-sm">
+            <p className="text-xs font-semibold uppercase tracking-wide text-[#1D4ED8]">
+              Sua nota nesta atividade
+            </p>
+            <p className="mt-2 text-3xl font-bold text-gray-900 tabular-nums">
+              {initialSubmission.score_total}
+              {activity.max_score != null ? (
+                <span className="text-xl font-semibold text-gray-500">
+                  {" "}
+                  / {activity.max_score}
+                </span>
+              ) : null}
+            </p>
+            <p className="mt-2 text-xs text-gray-600">
+              Inclui a parte objetiva e, quando houver, a correção das questões
+              abertas pelo professor.
+            </p>
+          </div>
+        ) : null}
+
         <div className="mt-8 border-t border-gray-100 pt-6">
           <h2 className="text-sm font-semibold text-gray-900 mb-3">
             Descrição
@@ -102,6 +145,18 @@ export default async function AlunoAtividadeDetalhePage({
             <ActivityAttachmentsList attachments={attachments} />
           )}
         </div>
+
+        {examPublic ? (
+          <StudentActivityExam
+            classroomId={classroomId}
+            activityId={activityId}
+            exam={examPublic}
+            initialSubmission={initialSubmission}
+            activityClosed={activity.status === "encerrada"}
+            maxScore={activity.max_score}
+            mcqSolutionsAfterSubmit={mcqSolutionsAfterSubmit}
+          />
+        ) : null}
 
         <div className="mt-10 flex flex-wrap gap-3">
           <Button type="button" variant="outline" asChild>

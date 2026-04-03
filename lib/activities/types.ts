@@ -17,6 +17,7 @@ export type ClassroomActivityRow = {
   due_at: string | null
   max_score: number | null
   status: ClassroomActivityStatus
+  /** `attachments`, `exam` (questoes MCQ + abertas — ver `lib/activities/exam.ts`), etc. */
   settings: Record<string, unknown>
   created_at: string
   updated_at: string
