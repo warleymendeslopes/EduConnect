@@ -25,12 +25,14 @@ import { ACTIVITY_TYPE_LABELS } from "@/lib/activities/types"
 import type { ClassroomMaterialRow } from "@/lib/materials/types"
 import { MATERIAL_STATUS_LABELS } from "@/lib/materials/types"
 import { ShareInviteButton } from "@/components/dashboard/share-invite-button"
+import { ActivitySubmissionsDialog } from "@/components/dashboard/activity-submissions-dialog"
 import { ClassroomActivityFormDialog } from "@/components/dashboard/classroom-activity-form-dialog"
 import { ClassroomMaterialFormDialog } from "@/components/dashboard/classroom-material-form-dialog"
 import { removeClassroomMember } from "@/app/actions/classrooms"
 import { deleteActivity } from "@/app/actions/classroom-activities"
 import { deleteMaterial } from "@/app/actions/classroom-materials"
 import { parseActivityAttachments } from "@/lib/activities/attachments"
+import { parseExamFromSettings } from "@/lib/activities/exam"
 import { ActivityAttachmentsList } from "@/components/dashboard/activity-attachments-list"
 import { toast } from "sonner"
 
@@ -53,6 +55,8 @@ type Props = {
   members: Member[]
   activities: ClassroomActivityRow[]
   materials: ClassroomMaterialRow[]
+  /** Contagem de provas enviadas (status enviado) por activity id */
+  submissionEnvios: Record<string, number>
 }
 
 function formatActivityWhen(iso: string | null): string {
@@ -69,6 +73,7 @@ export function ProfessorSalaDetail({
   members,
   activities,
   materials,
+  submissionEnvios,
 }: Props) {
   const router = useRouter()
   const [activeTab, setActiveTab] = useState("alunos")
@@ -79,6 +84,9 @@ export function ProfessorSalaDetail({
   const [materialDialogOpen, setMaterialDialogOpen] = useState(false)
   const [editingMaterial, setEditingMaterial] =
     useState<ClassroomMaterialRow | null>(null)
+  const [submissionsOpen, setSubmissionsOpen] = useState(false)
+  const [submissionsActivity, setSubmissionsActivity] =
+    useState<ClassroomActivityRow | null>(null)
 
   const handleRemove = async (studentId: string) => {
     if (!confirm("Remover este aluno da sala?")) return
@@ -303,7 +311,10 @@ export function ProfessorSalaDetail({
                   Nenhuma atividade ainda. Crie a primeira para a turma.
                 </p>
               ) : (
-                activities.map((ativ) => (
+                activities.map((ativ) => {
+                  const hasExam = !!parseExamFromSettings(ativ.settings)
+                  const enviados = submissionEnvios[ativ.id] ?? 0
+                  return (
                   <div
                     key={ativ.id}
                     className="border border-gray-100 rounded-xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-4"
@@ -348,11 +359,24 @@ export function ProfessorSalaDetail({
                     <div className="flex items-center gap-4 shrink-0">
                       <div className="text-center md:text-right">
                         <p className="font-mono text-xl font-bold text-gray-900">
-                          0/{classroom.member_count}
+                          {hasExam ? enviados : 0}/{classroom.member_count}
                         </p>
                         <p className="text-xs text-gray-500">entregas</p>
                       </div>
-                      <div className="flex gap-1">
+                      <div className="flex gap-1 flex-wrap justify-end">
+                        {hasExam ? (
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            className="shrink-0"
+                            onClick={() => {
+                              setSubmissionsActivity(ativ)
+                              setSubmissionsOpen(true)
+                            }}
+                          >
+                            Entregas
+                          </Button>
+                        ) : null}
                         <Button
                           type="button"
                           variant="outline"
@@ -376,7 +400,8 @@ export function ProfessorSalaDetail({
                       </div>
                     </div>
                   </div>
-                ))
+                  )
+                })
               )}
             </div>
           </div>
@@ -518,6 +543,16 @@ export function ProfessorSalaDetail({
         onOpenChange={setMaterialDialogOpen}
         material={editingMaterial}
         onSaved={() => router.refresh()}
+      />
+
+      <ActivitySubmissionsDialog
+        classroomId={classroom.id}
+        activity={submissionsActivity}
+        open={submissionsOpen}
+        onOpenChange={(o) => {
+          setSubmissionsOpen(o)
+          if (!o) setSubmissionsActivity(null)
+        }}
       />
     </div>
   )

@@ -3,6 +3,7 @@ import {
   getClassroomForProfessor,
   listMembersForClassroom,
 } from "@/app/actions/classrooms"
+import { getSubmissionEnviosByActivity } from "@/app/actions/activity-submissions"
 import { listActivitiesForClassroomAsProfessor } from "@/app/actions/classroom-activities"
 import { listMaterialsForClassroomAsProfessor } from "@/app/actions/classroom-materials"
 import { ProfessorSalaDetail } from "./professor-sala-detail"
@@ -23,12 +24,18 @@ export default async function ProfessorSalaDetalhesPage({
       listMaterialsForClassroomAsProfessor(id),
     ])
 
+  const submissionEnvios = await getSubmissionEnviosByActivity(
+    id,
+    activities.map((a) => a.id)
+  )
+
   return (
     <ProfessorSalaDetail
       classroom={result.row}
       members={members}
       activities={activities}
       materials={materials}
+      submissionEnvios={submissionEnvios}
     />
   )
 }
