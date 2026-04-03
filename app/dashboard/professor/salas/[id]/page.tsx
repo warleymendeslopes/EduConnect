@@ -6,6 +6,7 @@ import {
 import { getSubmissionEnviosByActivity } from "@/app/actions/activity-submissions"
 import { listActivitiesForClassroomAsProfessor } from "@/app/actions/classroom-activities"
 import { listMaterialsForClassroomAsProfessor } from "@/app/actions/classroom-materials"
+import { getClassroomPerformanceForProfessor } from "@/app/actions/classroom-performance"
 import { ProfessorSalaDetail } from "./professor-sala-detail"
 
 export default async function ProfessorSalaDetalhesPage({
@@ -17,11 +18,12 @@ export default async function ProfessorSalaDetalhesPage({
   const result = await getClassroomForProfessor(id)
   if (!result.row) notFound()
 
-  const [{ members }, { rows: activities }, { rows: materials }] =
+  const [{ members }, { rows: activities }, { rows: materials }, performance] =
     await Promise.all([
       listMembersForClassroom(id),
       listActivitiesForClassroomAsProfessor(id),
       listMaterialsForClassroomAsProfessor(id),
+      getClassroomPerformanceForProfessor(id),
     ])
 
   const submissionEnvios = await getSubmissionEnviosByActivity(
@@ -36,6 +38,7 @@ export default async function ProfessorSalaDetalhesPage({
       activities={activities}
       materials={materials}
       submissionEnvios={submissionEnvios}
+      performance={performance}
     />
   )
 }

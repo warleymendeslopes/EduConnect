@@ -6,6 +6,8 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import type { StudentSubmissionGrade } from "@/app/actions/activity-submissions"
+import type { StudentSelfPerformance } from "@/lib/classrooms/performance"
+import { AlunoPerformancePanel } from "@/components/dashboard/aluno-performance-panel"
 import { parseActivityAttachments } from "@/lib/activities/attachments"
 import { parseExamFromSettings } from "@/lib/activities/exam"
 import type { ClassroomActivityRow } from "@/lib/activities/types"
@@ -17,6 +19,7 @@ import { ptBR } from "date-fns/locale"
 import {
   ArrowLeft,
   BookOpen,
+  BarChart2,
   ExternalLink,
   FileText,
   FolderOpen,
@@ -26,7 +29,7 @@ import Link from "next/link"
 
 type Sala = ClassroomRow & { professor_name: string | null }
 
-type TabValue = "visao" | "atividades" | "materiais"
+type TabValue = "visao" | "atividades" | "materiais" | "desempenho"
 
 type Props = {
   sala: Sala
@@ -38,6 +41,8 @@ type Props = {
   defaultTab?: TabValue
   /** Notas do aluno em atividades com prova (por activity id). */
   submissionGradesByActivity?: Record<string, StudentSubmissionGrade>
+  /** Relatorio de desempenho (notas vs media da turma). */
+  studentPerformance: StudentSelfPerformance
 }
 
 function formatDue(iso: string | null): string {
@@ -57,6 +62,7 @@ export function AlunoSalaTabs({
   materialsError,
   defaultTab = "visao",
   submissionGradesByActivity = {},
+  studentPerformance,
 }: Props) {
   return (
     <div className="max-w-6xl mx-auto pb-20 lg:pb-0">
@@ -118,6 +124,10 @@ export function AlunoSalaTabs({
             <TabsTrigger value="materiais" className="gap-1.5">
               <FolderOpen className="h-3.5 w-3.5" />
               Material extra
+            </TabsTrigger>
+            <TabsTrigger value="desempenho" className="gap-1.5">
+              <BarChart2 className="h-3.5 w-3.5" />
+              Desempenho
             </TabsTrigger>
           </TabsList>
         </div>
@@ -273,6 +283,12 @@ export function AlunoSalaTabs({
                 ))}
               </ul>
             )}
+          </div>
+        </TabsContent>
+
+        <TabsContent value="desempenho" className="mt-0">
+          <div className="bg-white rounded-xl border border-gray-100 p-6 sm:p-8">
+            <AlunoPerformancePanel data={studentPerformance} />
           </div>
         </TabsContent>
       </Tabs>
