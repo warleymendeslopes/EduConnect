@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Textarea } from "@/components/ui/textarea"
+import { TrixActivityDescription } from "@/components/dashboard/trix-activity-description"
 import {
   Select,
   SelectContent,
@@ -97,6 +97,7 @@ export function ClassroomActivityFormDialog({
     []
   )
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
+  const [descriptionEditorKey, setDescriptionEditorKey] = useState(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -124,6 +125,7 @@ export function ClassroomActivityFormDialog({
     }
     setPendingFiles([])
     if (fileInputRef.current) fileInputRef.current.value = ""
+    setDescriptionEditorKey((k) => k + 1)
   }, [open, activity])
 
   const addPendingFiles = (list: FileList | null) => {
@@ -233,7 +235,7 @@ export function ClassroomActivityFormDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
+      <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
         <form onSubmit={handleSubmit}>
           <DialogHeader>
             <DialogTitle className="font-display">
@@ -273,13 +275,18 @@ export function ClassroomActivityFormDialog({
               />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="act-desc">Descricao</Label>
-              <Textarea
-                id="act-desc"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                rows={3}
-              />
+              <Label>Descricao</Label>
+              <p className="text-xs text-muted-foreground">
+                Texto formatado e imagens embutidas (guardado como HTML seguro).
+              </p>
+              {open ? (
+                <TrixActivityDescription
+                  key={descriptionEditorKey}
+                  classroomId={classroomId}
+                  initialHtml={description}
+                  onHtmlChange={setDescription}
+                />
+              ) : null}
             </div>
             <div className="grid gap-2">
               <Label htmlFor="act-files">Anexos (opcional)</Label>

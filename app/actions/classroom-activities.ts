@@ -16,11 +16,14 @@ import {
   parseActivityAttachments,
   safeUploadFilename,
 } from "@/lib/activities/attachments"
+import { sanitizeActivityHtml } from "@/lib/sanitize-activity-html"
 import type {
   ClassroomActivityRow,
   ClassroomActivityStatus,
   ClassroomActivityType,
 } from "@/lib/activities/types"
+
+const TRIX_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 
 export type CreateActivityInput = {
   classroomId: string
@@ -192,6 +195,96 @@ export async function listActivitiesForClassroomAsStudent(
   return { rows: (data ?? []) as ClassroomActivityRow[], error: null }
 }
 
+export async function getActivityForStudent(
+  classroomId: string,
+  activityId: string
+): Promise<{ row: ClassroomActivityRow | null; error: string | null }> {
+  const supabase = await createClient()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+  if (!user) return { row: null, error: "Nao autenticado" }
+
+  const { data: member } = await supabase
+    .from("classroom_members")
+    .select("id")
+    .eq("classroom_id", classroomId)
+    .eq("student_id", user.id)
+    .maybeSingle()
+
+  if (!member) return { row: null, error: "Voce nao participa desta sala" }
+
+  const { data, error } = await supabase
+    .from("classroom_activities")
+    .select("*")
+    .eq("id", activityId)
+    .eq("classroom_id", classroomId)
+    .maybeSingle()
+
+  if (error) return { row: null, error: error.message }
+  if (!data) return { row: null, error: null }
+  const row = data as ClassroomActivityRow
+  if (row.status === "rascunho") return { row: null, error: null }
+  return { row, error: null }
+}
+
+/** Imagem embutida no Trix (path sob classroom-activities/.../trix/). */
+export async function uploadTrixActivityImage(
+  classroomId: string,
+  formData: FormData
+): Promise<
+  | { ok: true; displayUrl: string; pathname: string }
+  | { ok: false; error: string }
+> {
+  const token = process.env.BLOB_READ_WRITE_TOKEN
+  if (!token) {
+    return { ok: false, error: "BLOB_READ_WRITE_TOKEN nao configurado" }
+  }
+
+  const supabase = await createClient()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+  if (!user) return { ok: false, error: "Nao autenticado" }
+
+  const ok = await assertProfessorOwnsClassroom(supabase, classroomId, user.id)
+  if (!ok) return { ok: false, error: "Sala nao encontrada" }
+
+  const file = formData.get("file")
+  if (!(file instanceof File) || file.size === 0) {
+    return { ok: false, error: "Nenhum arquivo" }
+  }
+  if (file.size > TRIX_IMAGE_MAX_BYTES) {
+    return {
+      ok: false,
+      error: `Imagem muito grande (max ${TRIX_IMAGE_MAX_BYTES / 1024 / 1024} MB)`,
+    }
+  }
+  const isImage =
+    /^image\/(jpeg|png|gif|webp)$/i.test(file.type) ||
+    (!file.type?.trim() &&
+      /\.(jpe?g|png|gif|webp)$/i.test(file.name))
+  if (!isImage) {
+    return { ok: false, error: "Apenas imagens JPEG, PNG, GIF ou WebP" }
+  }
+
+  const safe = safeUploadFilename(file.name)
+  const pathname = `classroom-activities/${classroomId}/trix/${randomUUID()}-${safe}`
+  const contentType = effectiveContentType(file)
+  try {
+    const blob = await put(pathname, file, {
+      access: "private",
+      token,
+      contentType,
+    })
+    const displayUrl = `/api/activity-attachment?pathname=${encodeURIComponent(blob.pathname)}&filename=${encodeURIComponent(file.name)}`
+    return { ok: true, displayUrl, pathname: blob.pathname }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Falha no upload"
+    return { ok: false, error: msg }
+  }
+}
+
 export async function createActivity(
   input: CreateActivityInput
 ): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
@@ -217,13 +310,15 @@ export async function createActivity(
   )
   if (attachErr) return { ok: false, error: attachErr }
 
+  const descriptionHtml = sanitizeActivityHtml(input.description.trim() || "")
+
   const { data, error } = await supabase
     .from("classroom_activities")
     .insert({
       classroom_id: input.classroomId,
       type: input.type,
       title,
-      description: input.description.trim() || null,
+      description: descriptionHtml || null,
       starts_at: input.startsAt || null,
       due_at: input.dueAt || null,
       max_score: input.maxScore,
@@ -236,6 +331,9 @@ export async function createActivity(
   if (error || !data) return { ok: false, error: error?.message ?? "Erro ao criar" }
   revalidatePath(`/dashboard/professor/salas/${input.classroomId}`)
   revalidatePath(`/dashboard/aluno/salas/${input.classroomId}`)
+  revalidatePath(
+    `/dashboard/aluno/salas/${input.classroomId}/atividades/${data.id}`
+  )
   return { ok: true, id: data.id }
 }
 
@@ -258,8 +356,10 @@ export async function updateActivity(
     if (!t) return { ok: false, error: "Titulo obrigatorio" }
     patch.title = t
   }
-  if (input.description !== undefined)
-    patch.description = input.description.trim() || null
+  if (input.description !== undefined) {
+    patch.description =
+      sanitizeActivityHtml(input.description.trim() || "") || null
+  }
   if (input.startsAt !== undefined) patch.starts_at = input.startsAt || null
   if (input.dueAt !== undefined) patch.due_at = input.dueAt || null
   if (input.maxScore !== undefined) patch.max_score = input.maxScore
@@ -304,6 +404,9 @@ export async function updateActivity(
   if (error) return { ok: false, error: error.message }
   revalidatePath(`/dashboard/professor/salas/${input.classroomId}`)
   revalidatePath(`/dashboard/aluno/salas/${input.classroomId}`)
+  revalidatePath(
+    `/dashboard/aluno/salas/${input.classroomId}/atividades/${input.id}`
+  )
   return { ok: true }
 }
 

@@ -4,12 +4,22 @@ import { listActivitiesForClassroomAsStudent } from "@/app/actions/classroom-act
 import { listMaterialsForClassroomAsStudent } from "@/app/actions/classroom-materials"
 import { AlunoSalaTabs } from "@/components/dashboard/aluno-sala-tabs"
 
+const VALID_TABS = new Set(["visao", "atividades", "materiais"])
+
 export default async function AlunoSalaDetalhePage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>
+  searchParams: Promise<{ tab?: string }>
 }) {
   const { id } = await params
+  const { tab } = await searchParams
+  const defaultTab =
+    tab && VALID_TABS.has(tab)
+      ? (tab as "visao" | "atividades" | "materiais")
+      : "visao"
+
   const result = await getClassroomForStudent(id)
   if (!result.row) notFound()
 
@@ -29,6 +39,7 @@ export default async function AlunoSalaDetalhePage({
       activitiesError={activitiesError}
       materials={materials}
       materialsError={materialsError}
+      defaultTab={defaultTab}
     />
   )
 }
