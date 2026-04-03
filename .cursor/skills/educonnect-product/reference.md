@@ -12,6 +12,8 @@ Síntese do que **já está no código** (workspace `/Volumes/warley/edu`) frent
 - **Middleware:** protege `/dashboard/*` (redireciona para `/login` se não houver sessão); usuários logados em `/login` ou `/cadastro` vão para o dashboard conforme `user_metadata.user_type` (fallback `aluno`).
 - **Tabela `public.profiles`:** script em `scripts/001_create_profiles.sql` — campos principais `full_name`, `user_type` (`aluno` \| `professor`), `avatar_url`, `bio`, `interesses` (`interests` como `text[]`), RLS, trigger `on_auth_user_created` preenchendo perfil a partir de `raw_user_meta_data`.
 - **Salas:** `scripts/002_classrooms.sql` — `classrooms`, `classroom_members`, RLS (sem recursao), RPCs `get_classroom_by_invite_code` e `join_classroom_by_invite`; rodar após o `001`.
+- **Atividades por sala:** `scripts/003_classroom_activities.sql` — `classroom_activities` (`classroom_id` FK, tipo, prazos, status, `settings` jsonb), índice `(classroom_id, due_at desc nulls last)`, RLS: professor dono da sala (CRUD); aluno membro com `status <> 'rascunho'` (SELECT). Server Actions em `app/actions/classroom-activities.ts`; UI professor em `professor-sala-detail` (lista + modal); aluno em `aluno-sala-tabs` (aba Atividades). Aplicar após o `002`.
+- **Material extra (não avaliativo):** `scripts/004_classroom_materials.sql` — `classroom_materials` (`title`, `description`, `external_url` https opcional, `status` `rascunho` \| `publicado`, `settings` jsonb para anexos). Sem nota, prazo ou tipos de prova. RLS: professor CRUD; aluno só `publicado`. Anexos em Vercel Blob com prefixo `classroom-materials/{classroomId}/`. Actions em `app/actions/classroom-materials.ts`; modal `classroom-material-form-dialog.tsx`; aba Material extra (professor e aluno). Download via [`app/api/activity-attachment/route.ts`](app/api/activity-attachment/route.ts) (também aceita pathnames `classroom-materials/...`). Aplicar após `002`/`003`.
 - **Fluxos:** `/login` (redirect por `profiles.user_type`), `/cadastro` (fluxo em etapas aluno/professor + metadata), `/cadastro/onboarding`, `/auth/callback`, `/auth/error`.
 - **Logout:** `signOut` nos layouts `dashboard/aluno` e `dashboard/professor`.
 
@@ -27,12 +29,12 @@ Síntese do que **já está no código** (workspace `/Volumes/warley/edu`) frent
 |------|----------------|
 | Público | `/`, `/login`, `/cadastro`, `/cadastro/onboarding`, `/professor/[slug]` |
 | Auth | `/auth/callback`, `/auth/error` |
-| Aluno | `/dashboard/aluno` (feed), `/dashboard/aluno/plano`, `/dashboard/aluno/tutor`, `/dashboard/aluno/explorar` |
+| Aluno | `/dashboard/aluno` (feed), `/dashboard/aluno/plano`, `/dashboard/aluno/salas`, `/dashboard/aluno/salas/[id]` (visão, atividades, material extra), `/dashboard/aluno/tutor`, `/dashboard/aluno/explorar` |
 | Professor | `/dashboard/professor` (feed), `/dashboard/professor/criar`, `/dashboard/professor/salas`, `/dashboard/professor/salas/[id]` |
 
 ### Lacunas comuns em relação ao documento de produto (a priorizar conforme roadmap)
 
-- Aluno: `/dashboard/aluno/salas`, `/salas/[id]`, `/progresso`, `/perfil`, **Configurações**; feed com IA real, StoryBar, interações completas.
+- Aluno: `/dashboard/aluno/progresso`, `/perfil`, **Configurações**; feed com IA real, StoryBar, interações completas. **Entregas de atividades** (submissões) ainda não implementadas — botão placeholder na aba Atividades.
 - Professor: `/alunos`, `/analise`, `/revisoes`, `/perfil`; estado **cadastro pendente** (banner + bloqueio criar conteúdo/sala) se ainda não houver campo/workflow no banco.
 - Conteúdo: `/conteudo/[id]`; módulos de **IA** (revisor, curador, plano dinâmico, tutor, corretor) — em geral UI/mock até integração.
 - **Confirmação de e-mail:** depende da configuração do projeto no Supabase (URLs de redirect e templates).
@@ -78,7 +80,7 @@ Visão semanal (`CalendarWeekView`), progresso por disciplina, tarefas diárias 
 
 ### Salas (aluno)
 
-Lista + código de convite. Dentro: abas Atividades, Material Extra, Mural, Ranking (opcional).
+Lista + código de convite. Dentro da sala (`/salas/:id`): abas **Visão geral**, **Atividades** (rascunhos ocultos por RLS) e **Material extra** (só `publicado`; copy de produto: material de apoio, não vale nota). Mural e ranking: em breve.
 
 ### Tutor IA
 
@@ -102,7 +104,7 @@ Tipos: Artigo, Vídeo, Lista de exercícios, Avaliação/Prova, Simulado, Dica r
 
 ### Salas (professor)
 
-CRUD sala, código tipo `EDU-4F8X`, link compartilhável. Abas: Alunos, Atividades (+ criar: trabalho, prova objetiva com gabarito e correção IA, simulado), Material Extra, Mural, Desempenho (export PDF).
+CRUD sala, código tipo `EDU-4F8X`, link compartilhável. Abas: Alunos, **Atividades** (CRUD em `classroom_activities`: tipos avaliativos; entregas `0/N` até existir `activity_submissions`), **Material extra** (CRUD em `classroom_materials` — anexos/links, sem nota; distinto de atividades), Mural, Desempenho (export PDF). Gabarito, questões e correção IA: fases futuras.
 
 ### Análise
 

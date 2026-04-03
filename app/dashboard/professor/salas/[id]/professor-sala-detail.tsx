@@ -14,12 +14,24 @@ import {
   FolderOpen,
   Plus,
   Trash2,
-  Download,
+  Pencil,
   AlertCircle,
 } from "lucide-react"
+import { format } from "date-fns"
+import { ptBR } from "date-fns/locale"
 import type { ClassroomRow } from "@/lib/classrooms/types"
+import type { ClassroomActivityRow } from "@/lib/activities/types"
+import { ACTIVITY_TYPE_LABELS } from "@/lib/activities/types"
+import type { ClassroomMaterialRow } from "@/lib/materials/types"
+import { MATERIAL_STATUS_LABELS } from "@/lib/materials/types"
 import { ShareInviteButton } from "@/components/dashboard/share-invite-button"
+import { ClassroomActivityFormDialog } from "@/components/dashboard/classroom-activity-form-dialog"
+import { ClassroomMaterialFormDialog } from "@/components/dashboard/classroom-material-form-dialog"
 import { removeClassroomMember } from "@/app/actions/classrooms"
+import { deleteActivity } from "@/app/actions/classroom-activities"
+import { deleteMaterial } from "@/app/actions/classroom-materials"
+import { parseActivityAttachments } from "@/lib/activities/attachments"
+import { ActivityAttachmentsList } from "@/components/dashboard/activity-attachments-list"
 import { toast } from "sonner"
 
 type Member = {
@@ -39,12 +51,34 @@ const TABS = [
 type Props = {
   classroom: ClassroomRow & { member_count: number }
   members: Member[]
+  activities: ClassroomActivityRow[]
+  materials: ClassroomMaterialRow[]
 }
 
-export function ProfessorSalaDetail({ classroom, members }: Props) {
+function formatActivityWhen(iso: string | null): string {
+  if (!iso) return "—"
+  try {
+    return format(new Date(iso), "dd/MM/yyyy HH:mm", { locale: ptBR })
+  } catch {
+    return "—"
+  }
+}
+
+export function ProfessorSalaDetail({
+  classroom,
+  members,
+  activities,
+  materials,
+}: Props) {
   const router = useRouter()
   const [activeTab, setActiveTab] = useState("alunos")
   const [removing, setRemoving] = useState<string | null>(null)
+  const [activityDialogOpen, setActivityDialogOpen] = useState(false)
+  const [editingActivity, setEditingActivity] =
+    useState<ClassroomActivityRow | null>(null)
+  const [materialDialogOpen, setMaterialDialogOpen] = useState(false)
+  const [editingMaterial, setEditingMaterial] =
+    useState<ClassroomMaterialRow | null>(null)
 
   const handleRemove = async (studentId: string) => {
     if (!confirm("Remover este aluno da sala?")) return
@@ -59,17 +93,47 @@ export function ProfessorSalaDetail({ classroom, members }: Props) {
     router.refresh()
   }
 
-  const mockedAtividades = [
-    {
-      id: 1,
-      tipo: "Prova Objetiva",
-      titulo: "Em breve: atividades reais",
-      prazo: "--",
-      entregas: 0,
-      total: classroom.member_count,
-      status: "aberta" as const,
-    },
-  ]
+  const openNewActivity = () => {
+    setEditingActivity(null)
+    setActivityDialogOpen(true)
+  }
+
+  const openEditActivity = (a: ClassroomActivityRow) => {
+    setEditingActivity(a)
+    setActivityDialogOpen(true)
+  }
+
+  const handleDeleteActivity = async (a: ClassroomActivityRow) => {
+    if (!confirm(`Excluir a atividade "${a.title}"?`)) return
+    const res = await deleteActivity(a.id, classroom.id)
+    if (!res.ok) {
+      toast.error(res.error)
+      return
+    }
+    toast.success("Atividade removida")
+    router.refresh()
+  }
+
+  const openNewMaterial = () => {
+    setEditingMaterial(null)
+    setMaterialDialogOpen(true)
+  }
+
+  const openEditMaterial = (m: ClassroomMaterialRow) => {
+    setEditingMaterial(m)
+    setMaterialDialogOpen(true)
+  }
+
+  const handleDeleteMaterial = async (m: ClassroomMaterialRow) => {
+    if (!confirm(`Excluir o material "${m.title}"?`)) return
+    const res = await deleteMaterial(m.id, classroom.id)
+    if (!res.ok) {
+      toast.error(res.error)
+      return
+    }
+    toast.success("Material removido")
+    router.refresh()
+  }
 
   return (
     <div className="max-w-6xl mx-auto pb-20 lg:pb-0">
@@ -221,50 +285,196 @@ export function ProfessorSalaDetail({ classroom, members }: Props) {
                   Atividades
                 </h2>
                 <p className="text-sm text-gray-500">
-                  Em breve: criacao de atividades por sala
+                  Somente alunos desta sala veem estas atividades
                 </p>
               </div>
               <Button
+                type="button"
                 className="bg-[#1D4ED8] hover:bg-[#1E3A8A] gap-2"
-                disabled
+                onClick={openNewActivity}
               >
                 <Plus className="h-4 w-4" />
                 Nova Atividade
               </Button>
             </div>
             <div className="p-4 sm:p-6 grid gap-4">
-              {mockedAtividades.map((ativ) => (
-                <div
-                  key={ativ.id}
-                  className="border border-gray-100 rounded-xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-4"
-                >
-                  <div>
-                    <span className="text-xs font-semibold px-2 py-0.5 rounded bg-blue-50 text-[#1D4ED8] uppercase tracking-wider">
-                      {ativ.tipo}
-                    </span>
-                    <h3 className="font-medium text-gray-900 text-lg mt-2">
-                      {ativ.titulo}
-                    </h3>
-                    <p className="text-sm text-gray-500 mt-1">
-                      Prazo: {ativ.prazo}
-                    </p>
+              {activities.length === 0 ? (
+                <p className="text-sm text-gray-500 text-center py-8">
+                  Nenhuma atividade ainda. Crie a primeira para a turma.
+                </p>
+              ) : (
+                activities.map((ativ) => (
+                  <div
+                    key={ativ.id}
+                    className="border border-gray-100 rounded-xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-4"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2 mb-1">
+                        <span className="text-xs font-semibold px-2 py-0.5 rounded bg-blue-50 text-[#1D4ED8] uppercase tracking-wider">
+                          {ACTIVITY_TYPE_LABELS[ativ.type]}
+                        </span>
+                        <Badge
+                          variant="secondary"
+                          className={
+                            ativ.status === "rascunho"
+                              ? "bg-amber-100 text-amber-800"
+                              : ativ.status === "encerrada"
+                                ? "bg-gray-100 text-gray-700"
+                                : "bg-green-100 text-green-800"
+                          }
+                        >
+                          {ativ.status === "rascunho"
+                            ? "Rascunho"
+                            : ativ.status === "encerrada"
+                              ? "Encerrada"
+                              : "Aberta"}
+                        </Badge>
+                      </div>
+                      <h3 className="font-medium text-gray-900 text-lg">
+                        {ativ.title}
+                      </h3>
+                      <p className="text-sm text-gray-500 mt-1">
+                        Prazo: {formatActivityWhen(ativ.due_at)}
+                        {ativ.max_score != null && (
+                          <span className="ml-2">
+                            · Nota max. {ativ.max_score}
+                          </span>
+                        )}
+                      </p>
+                      <ActivityAttachmentsList
+                        attachments={parseActivityAttachments(ativ.settings)}
+                      />
+                    </div>
+                    <div className="flex items-center gap-4 shrink-0">
+                      <div className="text-center md:text-right">
+                        <p className="font-mono text-xl font-bold text-gray-900">
+                          0/{classroom.member_count}
+                        </p>
+                        <p className="text-xs text-gray-500">entregas</p>
+                      </div>
+                      <div className="flex gap-1">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          className="shrink-0"
+                          onClick={() => openEditActivity(ativ)}
+                          aria-label="Editar atividade"
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          className="shrink-0 text-red-600 hover:text-red-700"
+                          onClick={() => handleDeleteActivity(ativ)}
+                          aria-label="Excluir atividade"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
                   </div>
-                  <div className="text-center md:text-right">
-                    <p className="font-mono text-xl font-bold text-gray-900">
-                      {ativ.entregas}/{ativ.total}
-                    </p>
-                    <p className="text-xs text-gray-500">entregas</p>
-                  </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
           </div>
         )}
 
         {activeTab === "materiais" && (
-          <div className="p-8 text-center text-gray-500 text-sm">
-            <FolderOpen className="h-10 w-10 mx-auto mb-2 text-gray-300" />
-            Material extra em uma proxima versao.
+          <div>
+            <div className="p-4 sm:p-6 border-b border-gray-100 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+              <div>
+                <h2 className="font-display font-semibold text-lg text-gray-900">
+                  Material extra
+                </h2>
+                <p className="text-sm text-gray-500">
+                  Apoio a turma — nao vale nota (diferente de Atividades)
+                </p>
+              </div>
+              <Button
+                type="button"
+                className="bg-[#1D4ED8] hover:bg-[#1E3A8A] gap-2"
+                onClick={openNewMaterial}
+              >
+                <Plus className="h-4 w-4" />
+                Adicionar material
+              </Button>
+            </div>
+            <div className="p-4 sm:p-6 grid gap-4">
+              {materials.length === 0 ? (
+                <p className="text-sm text-gray-500 text-center py-8">
+                  Nenhum material ainda. Envie PDFs, links ou arquivos de apoio.
+                </p>
+              ) : (
+                materials.map((mat) => (
+                  <div
+                    key={mat.id}
+                    className="border border-gray-100 rounded-xl p-4 flex flex-col md:flex-row md:items-start justify-between gap-4"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2 mb-1">
+                        <Badge
+                          variant="secondary"
+                          className={
+                            mat.status === "rascunho"
+                              ? "bg-amber-100 text-amber-800"
+                              : "bg-green-100 text-green-800"
+                          }
+                        >
+                          {MATERIAL_STATUS_LABELS[mat.status]}
+                        </Badge>
+                      </div>
+                      <h3 className="font-medium text-gray-900 text-lg">
+                        {mat.title}
+                      </h3>
+                      {mat.description?.trim() ? (
+                        <p className="text-sm text-gray-600 mt-1 line-clamp-3">
+                          {mat.description}
+                        </p>
+                      ) : null}
+                      {mat.external_url ? (
+                        <p className="text-sm mt-2">
+                          <a
+                            href={mat.external_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-[#1D4ED8] hover:underline break-all"
+                          >
+                            {mat.external_url}
+                          </a>
+                        </p>
+                      ) : null}
+                      <ActivityAttachmentsList
+                        attachments={parseActivityAttachments(mat.settings)}
+                      />
+                    </div>
+                    <div className="flex gap-1 shrink-0">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        onClick={() => openEditMaterial(mat)}
+                        aria-label="Editar material"
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        className="text-red-600 hover:text-red-700"
+                        onClick={() => handleDeleteMaterial(mat)}
+                        aria-label="Excluir material"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
           </div>
         )}
 
@@ -293,6 +503,22 @@ export function ProfessorSalaDetail({ classroom, members }: Props) {
           </div>
         )}
       </div>
+
+      <ClassroomActivityFormDialog
+        classroomId={classroom.id}
+        open={activityDialogOpen}
+        onOpenChange={setActivityDialogOpen}
+        activity={editingActivity}
+        onSaved={() => router.refresh()}
+      />
+
+      <ClassroomMaterialFormDialog
+        classroomId={classroom.id}
+        open={materialDialogOpen}
+        onOpenChange={setMaterialDialogOpen}
+        material={editingMaterial}
+        onSaved={() => router.refresh()}
+      />
     </div>
   )
 }

@@ -1,0 +1,246 @@
+"use client"
+
+import Link from "next/link"
+import { format } from "date-fns"
+import { ptBR } from "date-fns/locale"
+import {
+  ArrowLeft,
+  BookOpen,
+  ExternalLink,
+  FileText,
+  FolderOpen,
+  User,
+} from "lucide-react"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import type { ClassroomRow } from "@/lib/classrooms/types"
+import type { ClassroomActivityRow } from "@/lib/activities/types"
+import { ACTIVITY_TYPE_LABELS } from "@/lib/activities/types"
+import type { ClassroomMaterialRow } from "@/lib/materials/types"
+import { parseActivityAttachments } from "@/lib/activities/attachments"
+import { ActivityAttachmentsList } from "@/components/dashboard/activity-attachments-list"
+import { LeaveClassroomButton } from "@/components/dashboard/leave-classroom-button"
+
+type Sala = ClassroomRow & { professor_name: string | null }
+
+type Props = {
+  sala: Sala
+  activities: ClassroomActivityRow[]
+  activitiesError: string | null
+  materials: ClassroomMaterialRow[]
+  materialsError: string | null
+}
+
+function formatWhen(iso: string | null): string {
+  if (!iso) return "—"
+  try {
+    return format(new Date(iso), "dd/MM/yyyy HH:mm", { locale: ptBR })
+  } catch {
+    return "—"
+  }
+}
+
+export function AlunoSalaTabs({
+  sala,
+  activities,
+  activitiesError,
+  materials,
+  materialsError,
+}: Props) {
+  return (
+    <div className="max-w-6xl mx-auto pb-20 lg:pb-0">
+      <Link
+        href="/dashboard/aluno/salas"
+        className="text-gray-500 hover:text-gray-900 flex items-center gap-2 mb-6 transition-colors text-sm"
+      >
+        <ArrowLeft className="h-4 w-4" />
+        Voltar para Minhas Salas
+      </Link>
+
+      <Tabs defaultValue="visao" className="gap-4">
+        <div className="bg-white rounded-xl border border-gray-100 p-4 sm:p-6">
+          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-4">
+            <div className="min-w-0">
+              <div className="flex items-center gap-3 flex-wrap mb-2">
+                <h1 className="font-display text-2xl sm:text-3xl font-bold text-gray-900">
+                  {sala.name}
+                </h1>
+                <Badge
+                  variant="outline"
+                  className="border-gray-200 text-gray-600 bg-gray-50"
+                >
+                  {sala.education_level}
+                </Badge>
+                <Badge
+                  variant={sala.status === "ativa" ? "default" : "secondary"}
+                  className={
+                    sala.status === "ativa"
+                      ? "bg-green-100 text-green-800"
+                      : "bg-gray-100 text-gray-800"
+                  }
+                >
+                  {sala.status === "ativa" ? "Ativa" : "Encerrada"}
+                </Badge>
+              </div>
+              <div className="flex flex-wrap gap-4 text-sm text-gray-600">
+                <span className="flex items-center gap-1.5">
+                  <BookOpen className="h-4 w-4 text-gray-400" />
+                  {sala.subject}
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <User className="h-4 w-4 text-gray-400" />
+                  Prof. {sala.professor_name ?? "—"}
+                </span>
+              </div>
+            </div>
+            <LeaveClassroomButton classroomId={sala.id} />
+          </div>
+
+          <TabsList className="w-full sm:w-auto">
+            <TabsTrigger value="visao" className="gap-1.5">
+              Visão geral
+            </TabsTrigger>
+            <TabsTrigger value="atividades" className="gap-1.5">
+              <FileText className="h-3.5 w-3.5" />
+              Atividades
+            </TabsTrigger>
+            <TabsTrigger value="materiais" className="gap-1.5">
+              <FolderOpen className="h-3.5 w-3.5" />
+              Material extra
+            </TabsTrigger>
+          </TabsList>
+        </div>
+
+        <TabsContent value="visao" className="mt-0">
+          <div className="bg-white rounded-xl border border-gray-100 p-6 sm:p-8">
+            {sala.description?.trim() ? (
+              <p className="text-gray-700 border-t border-gray-100 pt-6 -mt-2">
+                {sala.description}
+              </p>
+            ) : (
+              <p className="text-gray-500 border-t border-gray-100 pt-6 -mt-2 text-sm">
+                Nenhuma descricao adicionada pelo professor.
+              </p>
+            )}
+
+            <div className="mt-8 rounded-lg bg-gray-50 border border-gray-100 p-4 text-sm text-gray-600">
+              <p className="font-medium text-gray-900 mb-1">Em breve</p>
+              Mural desta sala sera adicionado nas proximas versoes.
+            </div>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="atividades" className="mt-0">
+          <div className="bg-white rounded-xl border border-gray-100 p-6 sm:p-8">
+            {activitiesError ? (
+              <p className="text-sm text-red-600 mb-4">{activitiesError}</p>
+            ) : null}
+            {activities.length === 0 && !activitiesError ? (
+              <p className="text-sm text-gray-500 text-center py-10">
+                Nenhuma atividade publicada nesta sala ainda.
+              </p>
+            ) : (
+              <ul className="grid gap-4">
+                {activities.map((a) => (
+                  <li
+                    key={a.id}
+                    className="border border-gray-100 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4"
+                  >
+                    <div className="min-w-0">
+                      <span className="text-xs font-semibold px-2 py-0.5 rounded bg-blue-50 text-[#1D4ED8] uppercase tracking-wider">
+                        {ACTIVITY_TYPE_LABELS[a.type]}
+                      </span>
+                      <h2 className="font-medium text-gray-900 text-lg mt-2">
+                        {a.title}
+                      </h2>
+                      {a.description?.trim() ? (
+                        <p className="text-sm text-gray-600 mt-1 line-clamp-2">
+                          {a.description}
+                        </p>
+                      ) : null}
+                      <p className="text-sm text-gray-500 mt-2">
+                        Prazo: {formatWhen(a.due_at)}
+                        {a.max_score != null && (
+                          <span className="ml-2">
+                            · Nota max. {a.max_score}
+                          </span>
+                        )}
+                      </p>
+                      <Badge
+                        variant="secondary"
+                        className={
+                          a.status === "encerrada"
+                            ? "mt-2 bg-gray-100 text-gray-700"
+                            : "mt-2 bg-green-100 text-green-800"
+                        }
+                      >
+                        {a.status === "encerrada" ? "Encerrada" : "Aberta"}
+                      </Badge>
+                      <ActivityAttachmentsList
+                        attachments={parseActivityAttachments(a.settings)}
+                      />
+                    </div>
+                    <Button type="button" variant="outline" disabled>
+                      Entregar (em breve)
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </TabsContent>
+
+        <TabsContent value="materiais" className="mt-0">
+          <div className="bg-white rounded-xl border border-gray-100 p-6 sm:p-8">
+            <p className="text-sm text-gray-600 mb-4 border-b border-gray-100 pb-4">
+              Material de apoio — apenas consulta,{" "}
+              <span className="font-medium text-gray-900">nao vale nota</span>.
+              Para tarefas e avaliacoes, use a aba Atividades.
+            </p>
+            {materialsError ? (
+              <p className="text-sm text-red-600 mb-4">{materialsError}</p>
+            ) : null}
+            {materials.length === 0 && !materialsError ? (
+              <p className="text-sm text-gray-500 text-center py-10">
+                Nenhum material publicado nesta sala ainda.
+              </p>
+            ) : (
+              <ul className="grid gap-4">
+                {materials.map((m) => (
+                  <li
+                    key={m.id}
+                    className="border border-gray-100 rounded-xl p-4"
+                  >
+                    <h2 className="font-medium text-gray-900 text-lg">
+                      {m.title}
+                    </h2>
+                    {m.description?.trim() ? (
+                      <p className="text-sm text-gray-600 mt-2 whitespace-pre-wrap">
+                        {m.description}
+                      </p>
+                    ) : null}
+                    {m.external_url ? (
+                      <a
+                        href={m.external_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 text-sm text-[#1D4ED8] hover:underline mt-3 break-all"
+                      >
+                        <ExternalLink className="h-4 w-4 shrink-0" />
+                        Abrir link externo
+                      </a>
+                    ) : null}
+                    <ActivityAttachmentsList
+                      attachments={parseActivityAttachments(m.settings)}
+                    />
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </TabsContent>
+      </Tabs>
+    </div>
+  )
+}

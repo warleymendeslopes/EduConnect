@@ -3,6 +3,8 @@ import {
   getClassroomForProfessor,
   listMembersForClassroom,
 } from "@/app/actions/classrooms"
+import { listActivitiesForClassroomAsProfessor } from "@/app/actions/classroom-activities"
+import { listMaterialsForClassroomAsProfessor } from "@/app/actions/classroom-materials"
 import { ProfessorSalaDetail } from "./professor-sala-detail"
 
 export default async function ProfessorSalaDetalhesPage({
@@ -14,9 +16,19 @@ export default async function ProfessorSalaDetalhesPage({
   const result = await getClassroomForProfessor(id)
   if (!result.row) notFound()
 
-  const { members } = await listMembersForClassroom(id)
+  const [{ members }, { rows: activities }, { rows: materials }] =
+    await Promise.all([
+      listMembersForClassroom(id),
+      listActivitiesForClassroomAsProfessor(id),
+      listMaterialsForClassroomAsProfessor(id),
+    ])
 
   return (
-    <ProfessorSalaDetail classroom={result.row} members={members} />
+    <ProfessorSalaDetail
+      classroom={result.row}
+      members={members}
+      activities={activities}
+      materials={materials}
+    />
   )
 }

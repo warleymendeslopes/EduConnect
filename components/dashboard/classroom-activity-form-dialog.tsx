@@ -1,0 +1,430 @@
+"use client"
+
+import { useEffect, useRef, useState } from "react"
+import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import type {
+  ClassroomActivityRow,
+  ClassroomActivityStatus,
+  ClassroomActivityType,
+} from "@/lib/activities/types"
+import { ACTIVITY_TYPE_LABELS } from "@/lib/activities/types"
+import {
+  createActivity,
+  updateActivity,
+  uploadActivityAttachmentFiles,
+} from "@/app/actions/classroom-activities"
+import type { ActivityAttachment } from "@/lib/activities/attachments"
+import {
+  ACTIVITY_ATTACHMENT_ACCEPT,
+  ACTIVITY_ATTACHMENT_MAX_BYTES,
+  ACTIVITY_ATTACHMENT_MAX_PER_ACTIVITY,
+  isAllowedActivityAttachmentType,
+  parseActivityAttachments,
+} from "@/lib/activities/attachments"
+import { toast } from "sonner"
+import { Paperclip, X } from "lucide-react"
+
+const TYPES: ClassroomActivityType[] = [
+  "trabalho",
+  "prova_objetiva",
+  "lista_exercicios",
+  "simulado",
+]
+
+const STATUSES: ClassroomActivityStatus[] = ["rascunho", "aberta", "encerrada"]
+
+function isoToDatetimeLocal(iso: string | null): string {
+  if (!iso) return ""
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ""
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, "0")
+  const day = String(d.getDate()).padStart(2, "0")
+  const h = String(d.getHours()).padStart(2, "0")
+  const min = String(d.getMinutes()).padStart(2, "0")
+  return `${y}-${m}-${day}T${h}:${min}`
+}
+
+function datetimeLocalToIso(local: string): string | null {
+  if (!local.trim()) return null
+  const t = new Date(local).getTime()
+  if (Number.isNaN(t)) return null
+  return new Date(local).toISOString()
+}
+
+type Props = {
+  classroomId: string
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  activity: ClassroomActivityRow | null
+  onSaved: () => void
+}
+
+export function ClassroomActivityFormDialog({
+  classroomId,
+  open,
+  onOpenChange,
+  activity,
+  onSaved,
+}: Props) {
+  const [loading, setLoading] = useState(false)
+  const [type, setType] = useState<ClassroomActivityType>("trabalho")
+  const [title, setTitle] = useState("")
+  const [description, setDescription] = useState("")
+  const [startsLocal, setStartsLocal] = useState("")
+  const [dueLocal, setDueLocal] = useState("")
+  const [maxScore, setMaxScore] = useState("")
+  const [status, setStatus] = useState<ClassroomActivityStatus>("aberta")
+  const [keptAttachments, setKeptAttachments] = useState<ActivityAttachment[]>(
+    []
+  )
+  const [pendingFiles, setPendingFiles] = useState<File[]>([])
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    if (activity) {
+      setType(activity.type)
+      setTitle(activity.title)
+      setDescription(activity.description ?? "")
+      setStartsLocal(isoToDatetimeLocal(activity.starts_at))
+      setDueLocal(isoToDatetimeLocal(activity.due_at))
+      setMaxScore(
+        activity.max_score != null ? String(activity.max_score) : ""
+      )
+      setStatus(activity.status)
+      setKeptAttachments(parseActivityAttachments(activity.settings))
+    } else {
+      setType("trabalho")
+      setTitle("")
+      setDescription("")
+      setStartsLocal("")
+      setDueLocal("")
+      setMaxScore("")
+      setStatus("aberta")
+      setKeptAttachments([])
+    }
+    setPendingFiles([])
+    if (fileInputRef.current) fileInputRef.current.value = ""
+  }, [open, activity])
+
+  const addPendingFiles = (list: FileList | null) => {
+    if (!list?.length) return
+    const next: File[] = [...pendingFiles]
+    for (let i = 0; i < list.length; i++) {
+      const file = list[i]
+      if (file.size > ACTIVITY_ATTACHMENT_MAX_BYTES) {
+        toast.error(
+          `"${file.name}" excede o tamanho maximo (${Math.round(ACTIVITY_ATTACHMENT_MAX_BYTES / 1024 / 1024)} MB)`
+        )
+        continue
+      }
+      if (!isAllowedActivityAttachmentType(file.type, file.name)) {
+        toast.error(`Tipo nao permitido: ${file.name}`)
+        continue
+      }
+      if (
+        keptAttachments.length + next.length >=
+        ACTIVITY_ATTACHMENT_MAX_PER_ACTIVITY
+      ) {
+        toast.error(
+          `No maximo ${ACTIVITY_ATTACHMENT_MAX_PER_ACTIVITY} arquivos por atividade`
+        )
+        break
+      }
+      next.push(file)
+    }
+    setPendingFiles(next)
+    if (fileInputRef.current) fileInputRef.current.value = ""
+  }
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setLoading(true)
+    const max =
+      maxScore.trim() === "" ? null : parseFloat(maxScore.replace(",", "."))
+    const maxFinal =
+      max != null && !Number.isNaN(max) && max >= 0 ? max : null
+
+    let newUploaded: ActivityAttachment[] = []
+    if (pendingFiles.length > 0) {
+      const fd = new FormData()
+      pendingFiles.forEach((f) => fd.append("files", f))
+      const up = await uploadActivityAttachmentFiles(classroomId, fd)
+      if (!up.ok) {
+        setLoading(false)
+        toast.error(up.error)
+        return
+      }
+      newUploaded = up.attachments
+    }
+
+    const attachments: ActivityAttachment[] = [
+      ...keptAttachments,
+      ...newUploaded,
+    ]
+    if (attachments.length > ACTIVITY_ATTACHMENT_MAX_PER_ACTIVITY) {
+      setLoading(false)
+      toast.error(
+        `No maximo ${ACTIVITY_ATTACHMENT_MAX_PER_ACTIVITY} arquivos por atividade`
+      )
+      return
+    }
+
+    if (activity) {
+      const res = await updateActivity({
+        id: activity.id,
+        classroomId,
+        type,
+        title,
+        description,
+        startsAt: datetimeLocalToIso(startsLocal),
+        dueAt: datetimeLocalToIso(dueLocal),
+        maxScore: maxFinal,
+        status,
+        attachments,
+      })
+      setLoading(false)
+      if (!res.ok) {
+        toast.error(res.error)
+        return
+      }
+      toast.success("Atividade atualizada")
+    } else {
+      const res = await createActivity({
+        classroomId,
+        type,
+        title,
+        description,
+        startsAt: datetimeLocalToIso(startsLocal),
+        dueAt: datetimeLocalToIso(dueLocal),
+        maxScore: maxFinal,
+        status,
+        attachments,
+      })
+      setLoading(false)
+      if (!res.ok) {
+        toast.error(res.error)
+        return
+      }
+      toast.success("Atividade criada")
+    }
+    onOpenChange(false)
+    onSaved()
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
+        <form onSubmit={handleSubmit}>
+          <DialogHeader>
+            <DialogTitle className="font-display">
+              {activity ? "Editar atividade" : "Nova atividade"}
+            </DialogTitle>
+            <DialogDescription>
+              Visivel apenas para alunos desta sala. Rascunho nao aparece para
+              alunos ate publicar como aberta ou encerrada.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid gap-2">
+              <Label>Tipo</Label>
+              <Select
+                value={type}
+                onValueChange={(v) => setType(v as ClassroomActivityType)}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {TYPES.map((t) => (
+                    <SelectItem key={t} value={t}>
+                      {ACTIVITY_TYPE_LABELS[t]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="act-title">Titulo</Label>
+              <Input
+                id="act-title"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                required
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="act-desc">Descricao</Label>
+              <Textarea
+                id="act-desc"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                rows={3}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="act-files">Anexos (opcional)</Label>
+              <p className="text-xs text-muted-foreground">
+                PDF, Word (.doc / .docx) ou imagem. Ate{" "}
+                {ACTIVITY_ATTACHMENT_MAX_PER_ACTIVITY} arquivos,{" "}
+                {Math.round(ACTIVITY_ATTACHMENT_MAX_BYTES / 1024 / 1024)} MB cada.
+              </p>
+              <Input
+                id="act-files"
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept={ACTIVITY_ATTACHMENT_ACCEPT}
+                className="cursor-pointer"
+                onChange={(e) => addPendingFiles(e.target.files)}
+              />
+              {keptAttachments.length > 0 && (
+                <ul className="text-sm space-y-1 border border-gray-100 rounded-md p-2">
+                  {keptAttachments.map((a) => (
+                    <li
+                      key={a.url}
+                      className="flex items-center justify-between gap-2"
+                    >
+                      <span className="truncate text-gray-700 flex items-center gap-1 min-w-0">
+                        <Paperclip className="h-3.5 w-3.5 shrink-0 text-gray-400" />
+                        {a.filename}
+                      </span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="shrink-0 h-7 w-7"
+                        onClick={() =>
+                          setKeptAttachments((prev) =>
+                            prev.filter((x) => x.url !== a.url)
+                          )
+                        }
+                        aria-label="Remover anexo"
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {pendingFiles.length > 0 && (
+                <ul className="text-sm space-y-1 border border-dashed border-gray-200 rounded-md p-2">
+                  {pendingFiles.map((f, i) => (
+                    <li
+                      key={`${f.name}-${i}`}
+                      className="flex items-center justify-between gap-2"
+                    >
+                      <span className="truncate text-gray-600">
+                        {f.name} ({Math.round(f.size / 1024)} KB)
+                      </span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="shrink-0 h-7 w-7"
+                        onClick={() =>
+                          setPendingFiles((prev) =>
+                            prev.filter((_, j) => j !== i)
+                          )
+                        }
+                        aria-label="Remover da fila"
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div className="grid sm:grid-cols-2 gap-4">
+              <div className="grid gap-2">
+                <Label htmlFor="act-start">Inicio (opcional)</Label>
+                <Input
+                  id="act-start"
+                  type="datetime-local"
+                  value={startsLocal}
+                  onChange={(e) => setStartsLocal(e.target.value)}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="act-due">Prazo (opcional)</Label>
+                <Input
+                  id="act-due"
+                  type="datetime-local"
+                  value={dueLocal}
+                  onChange={(e) => setDueLocal(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="act-score">Nota maxima (opcional)</Label>
+              <Input
+                id="act-score"
+                type="number"
+                min={0}
+                step={0.5}
+                value={maxScore}
+                onChange={(e) => setMaxScore(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label>Status</Label>
+              <Select
+                value={status}
+                onValueChange={(v) =>
+                  setStatus(v as ClassroomActivityStatus)
+                }
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {STATUSES.map((s) => (
+                    <SelectItem key={s} value={s}>
+                      {s === "rascunho"
+                        ? "Rascunho (só professor)"
+                        : s === "aberta"
+                          ? "Aberta"
+                          : "Encerrada"}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+              Cancelar
+            </Button>
+            <Button
+              type="submit"
+              className="bg-[#1D4ED8] hover:bg-[#1E3A8A]"
+              disabled={loading}
+            >
+              {loading ? "Salvando..." : activity ? "Salvar" : "Criar"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
