@@ -12,7 +12,7 @@ Síntese do que **já está no código** (workspace `/Volumes/warley/edu`) frent
 - **Middleware:** protege `/dashboard/*` (redireciona para `/login` se não houver sessão); usuários logados em `/login` ou `/cadastro` vão para o dashboard conforme `user_metadata.user_type` (fallback `aluno`).
 - **Tabela `public.profiles`:** script em `scripts/001_create_profiles.sql` — campos principais `full_name`, `user_type` (`aluno` \| `professor`), `avatar_url`, `bio`, `interesses` (`interests` como `text[]`), RLS, trigger `on_auth_user_created` preenchendo perfil a partir de `raw_user_meta_data`.
 - **Salas:** `scripts/002_classrooms.sql` — `classrooms`, `classroom_members`, RLS (sem recursao), RPCs `get_classroom_by_invite_code` e `join_classroom_by_invite`; rodar após o `001`.
-- **Atividades por sala:** `scripts/003_classroom_activities.sql` — `classroom_activities` (`classroom_id` FK, tipo, prazos, status, `settings` jsonb), índice `(classroom_id, due_at desc nulls last)`, RLS: professor dono da sala (CRUD); aluno membro com `status <> 'rascunho'` (SELECT). Server Actions em `app/actions/classroom-activities.ts`; UI professor em `professor-sala-detail` (lista + modal); aluno em `aluno-sala-tabs` (aba Atividades). Aplicar após o `002`.
+- **Atividades por sala:** `scripts/003_classroom_activities.sql` — `classroom_activities` (`classroom_id` FK, tipo, prazos, status, `settings` jsonb), coluna `description` em texto pode guardar **HTML** (Trix). RLS: professor dono da sala (CRUD); aluno membro com `status <> 'rascunho'` (SELECT). Actions em `app/actions/classroom-activities.ts` (`getActivityForStudent`, `uploadTrixActivityImage` para imagens no Trix, sanitização em create/update via `sanitizeActivityHtml`). Professor: `professor-sala-detail` + modal `classroom-activity-form-dialog` com **Trix** (`TrixActivityDescription`). Aluno: lista compacta em `aluno-sala-tabs` (título, prazo, anexos, link **Ver detalhes**); detalhe em `/dashboard/aluno/salas/[id]/atividades/[activityId]` com `RichTextContent` (DOMPurify). Query `?tab=atividades` na página da sala abre a aba Atividades. Aplicar após o `002`.
 - **Material extra (não avaliativo):** `scripts/004_classroom_materials.sql` — `classroom_materials` (`title`, `description`, `external_url` https opcional, `status` `rascunho` \| `publicado`, `settings` jsonb para anexos). Sem nota, prazo ou tipos de prova. RLS: professor CRUD; aluno só `publicado`. Anexos em Vercel Blob com prefixo `classroom-materials/{classroomId}/`. Actions em `app/actions/classroom-materials.ts`; modal `classroom-material-form-dialog.tsx`; aba Material extra (professor e aluno). Download via [`app/api/activity-attachment/route.ts`](app/api/activity-attachment/route.ts) (também aceita pathnames `classroom-materials/...`). Aplicar após `002`/`003`.
 - **Fluxos:** `/login` (redirect por `profiles.user_type`), `/cadastro` (fluxo em etapas aluno/professor + metadata), `/cadastro/onboarding`, `/auth/callback`, `/auth/error`.
 - **Logout:** `signOut` nos layouts `dashboard/aluno` e `dashboard/professor`.
@@ -29,7 +29,7 @@ Síntese do que **já está no código** (workspace `/Volumes/warley/edu`) frent
 |------|----------------|
 | Público | `/`, `/login`, `/cadastro`, `/cadastro/onboarding`, `/professor/[slug]` |
 | Auth | `/auth/callback`, `/auth/error` |
-| Aluno | `/dashboard/aluno` (feed), `/dashboard/aluno/plano`, `/dashboard/aluno/salas`, `/dashboard/aluno/salas/[id]` (visão, atividades, material extra), `/dashboard/aluno/tutor`, `/dashboard/aluno/explorar` |
+| Aluno | `/dashboard/aluno` (feed), `/dashboard/aluno/plano`, `/dashboard/aluno/salas`, `/dashboard/aluno/salas/[id]` (`?tab=atividades` \| `materiais` \| `visao`), `/dashboard/aluno/salas/[id]/atividades/[activityId]` (detalhe + descrição HTML sanitizada), `/dashboard/aluno/tutor`, `/dashboard/aluno/explorar` |
 | Professor | `/dashboard/professor` (feed), `/dashboard/professor/criar`, `/dashboard/professor/salas`, `/dashboard/professor/salas/[id]` |
 
 ### Lacunas comuns em relação ao documento de produto (a priorizar conforme roadmap)
@@ -80,7 +80,7 @@ Visão semanal (`CalendarWeekView`), progresso por disciplina, tarefas diárias 
 
 ### Salas (aluno)
 
-Lista + código de convite. Dentro da sala (`/salas/:id`): abas **Visão geral**, **Atividades** (rascunhos ocultos por RLS) e **Material extra** (só `publicado`; copy de produto: material de apoio, não vale nota). Mural e ranking: em breve.
+Lista + código de convite. Dentro da sala (`/salas/:id`): abas **Visão geral**, **Atividades** (lista compacta; descrição completa na página de detalhe da atividade) e **Material extra** (só `publicado`; copy de produto: material de apoio, não vale nota). Mural e ranking: em breve.
 
 ### Tutor IA
 
@@ -125,7 +125,8 @@ Métricas de feed + salas; engajamento, risco de evasão, etc.
 /dashboard/aluno           → Feed
 /dashboard/aluno/plano     → Plano
 /dashboard/aluno/salas     → Salas lista
-/dashboard/aluno/salas/:id → Sala aluno
+/dashboard/aluno/salas/:id → Sala aluno (?tab=atividades)
+/dashboard/aluno/salas/:id/atividades/:activityId → Detalhe atividade (aluno)
 /dashboard/aluno/tutor     → Tutor
 /dashboard/aluno/explorar  → Explorar
 /dashboard/aluno/progresso → Progresso

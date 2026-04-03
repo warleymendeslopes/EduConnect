@@ -11,6 +11,7 @@ export type ClassroomActivityRow = {
   classroom_id: string
   type: ClassroomActivityType
   title: string
+  /** HTML gerado pelo editor Trix (professor); exibir com sanitização (ex.: RichTextContent). */
   description: string | null
   starts_at: string | null
   due_at: string | null
