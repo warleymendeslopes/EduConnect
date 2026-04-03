@@ -7,6 +7,7 @@ export const runtime = "nodejs"
 const ALLOWED_PREFIXES = [
   /^classroom-activities\/([^/]+)\//,
   /^classroom-materials\/([^/]+)\//,
+  /^classroom-mural\/([^/]+)\//,
 ]
 
 function extractClassroomId(pathname: string): string | null {
