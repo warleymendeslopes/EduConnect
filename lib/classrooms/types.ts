@@ -27,3 +27,16 @@ export type ClassroomPreview = {
 export type JoinClassroomResult =
   | { ok: true; classroomId: string }
   | { ok: false; error: string }
+
+/** Turma onde um aluno esta matriculado (visao agregada professor). */
+export type ProfessorStudentClassroomRef = {
+  id: string
+  name: string
+  subject: string
+}
+
+export type ProfessorStudentRow = {
+  studentId: string
+  fullName: string | null
+  classrooms: ProfessorStudentClassroomRef[]
+}

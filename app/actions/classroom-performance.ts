@@ -6,6 +6,7 @@ import type { ClassroomActivityRow } from "@/lib/activities/types"
 import type {
   ActivityPerformanceSummary,
   ClassroomPerformanceForProfessor,
+  ProfessorStudentOverview,
   SelfActivityPerformance,
   StudentAverageHistogramBin,
   StudentPerformanceRow,
@@ -361,36 +362,15 @@ export async function getClassroomPerformanceForProfessor(
 
 type RpcStatRow = { activity_id: string; avg_score: number; score_count: number }
 
-export async function getMyPerformanceInClassroom(
-  classroomId: string
+/**
+ * Desempenho do aluno (studentId) numa sala — medias da turma via RPC 007.
+ * Usado pelo proprio aluno ou pelo professor da sala.
+ */
+async function loadStudentSelfPerformanceForClassroom(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  classroomId: string,
+  studentId: string
 ): Promise<StudentSelfPerformance> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-  if (!user) {
-    return {
-      evaluativeActivityCount: 0,
-      myOverallAverage: null,
-      myOverallPercent: null,
-      classOverallAverage: null,
-      activities: [],
-      error: "Nao autenticado",
-    }
-  }
-
-  const member = await assertStudentMember(supabase, classroomId, user.id)
-  if (!member) {
-    return {
-      evaluativeActivityCount: 0,
-      myOverallAverage: null,
-      myOverallPercent: null,
-      classOverallAverage: null,
-      activities: [],
-      error: "Voce nao participa desta sala",
-    }
-  }
-
   const { data: actRows, error: actErr } = await supabase
     .from("classroom_activities")
     .select("*")
@@ -425,7 +405,7 @@ export async function getMyPerformanceInClassroom(
   const { data: mySubs, error: myErr } = await supabase
     .from("classroom_activity_submissions")
     .select("activity_id, status, score_total, submitted_at")
-    .eq("student_id", user.id)
+    .eq("student_id", studentId)
     .in("activity_id", evalIds)
 
   if (myErr) {
@@ -520,5 +500,158 @@ export async function getMyPerformanceInClassroom(
     error: rpcErr
       ? `Medias da turma indisponiveis (aplique scripts/007 ou verifique RPC): ${rpcErr.message}`
       : null,
+  }
+}
+
+export async function getMyPerformanceInClassroom(
+  classroomId: string
+): Promise<StudentSelfPerformance> {
+  const supabase = await createClient()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+  if (!user) {
+    return {
+      evaluativeActivityCount: 0,
+      myOverallAverage: null,
+      myOverallPercent: null,
+      classOverallAverage: null,
+      activities: [],
+      error: "Nao autenticado",
+    }
+  }
+
+  const member = await assertStudentMember(supabase, classroomId, user.id)
+  if (!member) {
+    return {
+      evaluativeActivityCount: 0,
+      myOverallAverage: null,
+      myOverallPercent: null,
+      classOverallAverage: null,
+      activities: [],
+      error: "Voce nao participa desta sala",
+    }
+  }
+
+  return loadStudentSelfPerformanceForClassroom(supabase, classroomId, user.id)
+}
+
+/** Professor: desempenho de um aluno nas salas em que ambos coincidem (so suas turmas). */
+export async function getProfessorStudentOverview(
+  studentId: string
+): Promise<ProfessorStudentOverview> {
+  const supabase = await createClient()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+  if (!user) {
+    return { studentId, fullName: null, classrooms: [], error: "Nao autenticado" }
+  }
+
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("user_type")
+    .eq("id", user.id)
+    .maybeSingle()
+
+  if (profile?.user_type !== "professor") {
+    return {
+      studentId,
+      fullName: null,
+      classrooms: [],
+      error: "Apenas professores",
+    }
+  }
+
+  const { data: rooms, error: roomErr } = await supabase
+    .from("classrooms")
+    .select("id, name, subject, education_level")
+    .eq("professor_id", user.id)
+    .order("name", { ascending: true })
+
+  if (roomErr || !rooms) {
+    return {
+      studentId,
+      fullName: null,
+      classrooms: [],
+      error: roomErr?.message ?? "Erro ao carregar salas",
+    }
+  }
+
+  const roomIds = rooms.map((r) => r.id as string)
+  if (roomIds.length === 0) {
+    return {
+      studentId,
+      fullName: null,
+      classrooms: [],
+      error: "Voce ainda nao tem turmas. Crie uma em Minhas Salas para ver alunos.",
+    }
+  }
+
+  const { data: memberRows, error: memErr } = await supabase
+    .from("classroom_members")
+    .select("classroom_id, joined_at")
+    .eq("student_id", studentId)
+    .in("classroom_id", roomIds)
+
+  if (memErr) {
+    return {
+      studentId,
+      fullName: null,
+      classrooms: [],
+      error: memErr.message,
+    }
+  }
+
+  const rows = memberRows ?? []
+  if (rows.length === 0) {
+    return {
+      studentId,
+      fullName: null,
+      classrooms: [],
+      error: "Este aluno nao esta em nenhuma das suas turmas",
+    }
+  }
+
+  const joinedByClass = new Map<string, string | null>()
+  for (const m of rows) {
+    joinedByClass.set(m.classroom_id as string, (m.joined_at as string) ?? null)
+  }
+
+  const { data: studentProfile } = await supabase
+    .from("profiles")
+    .select("full_name")
+    .eq("id", studentId)
+    .maybeSingle()
+
+  const fullName = (studentProfile?.full_name as string | null) ?? null
+
+  const classrooms: ProfessorStudentOverview["classrooms"] = []
+
+  for (const room of rooms) {
+    const cid = room.id as string
+    if (!joinedByClass.has(cid)) continue
+
+    const performance = await loadStudentSelfPerformanceForClassroom(
+      supabase,
+      cid,
+      studentId
+    )
+
+    classrooms.push({
+      classroomId: cid,
+      name: (room.name as string) ?? "",
+      subject: (room.subject as string) ?? "",
+      educationLevel: (room.education_level as string) ?? "",
+      joinedAt: joinedByClass.get(cid) ?? null,
+      performance,
+    })
+  }
+
+  return {
+    studentId,
+    fullName,
+    classrooms,
+    error: null,
   }
 }

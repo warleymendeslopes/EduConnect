@@ -559,7 +559,7 @@ export async function gradeOpenAnswers(
 
   const { data: sub, error: fetchErr } = await supabase
     .from("classroom_activity_submissions")
-    .select("id, score_mcq, status, open_scores")
+    .select("id, student_id, score_mcq, status, open_scores")
     .eq("id", submissionId)
     .eq("activity_id", activityId)
     .maybeSingle()
@@ -585,5 +585,9 @@ export async function gradeOpenAnswers(
 
   if (error) return { ok: false, error: error.message }
   revalidateActivityPaths(classroomId, activityId)
+  const sid = sub.student_id as string | undefined
+  if (sid) {
+    revalidatePath(`/dashboard/professor/alunos/${sid}`)
+  }
   return { ok: true }
 }
