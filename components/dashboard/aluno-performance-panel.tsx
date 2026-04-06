@@ -19,9 +19,15 @@ function fmtNum(n: number | null, d = 1): string {
 
 type Props = {
   data: StudentSelfPerformance
+  /** Textos em segunda pessoa (aluno) ou neutros (visao do professor). */
+  audience?: "student" | "professor"
 }
 
-export function AlunoPerformancePanel({ data }: Props) {
+export function AlunoPerformancePanel({
+  data,
+  audience = "student",
+}: Props) {
+  const prof = audience === "professor"
   if (data.error && data.activities.length === 0) {
     return (
       <div className="p-6 text-sm text-red-600 flex items-start gap-2">
@@ -35,11 +41,12 @@ export function AlunoPerformancePanel({ data }: Props) {
     return (
       <div className="p-8 text-center text-gray-500 text-sm max-w-md mx-auto">
         <p className="mb-2 text-gray-700 font-medium">
-          Nenhuma avaliacao com nota nesta sala
+          Nenhuma avaliacao com nota nesta turma
         </p>
         <p>
-          Quando o professor publicar provas e as notas forem fechadas, veras
-          aqui as tuas medias e a comparacao agregada com a turma.
+          {prof
+            ? "Quando voce publicar provas e as notas forem fechadas, o desenvolvimento do aluno aparecera aqui com medias e comparacao agregada com a turma."
+            : "Quando o professor publicar provas e as notas forem fechadas, veras aqui as tuas medias e a comparacao agregada com a turma."}
         </p>
       </div>
     )
@@ -75,7 +82,7 @@ export function AlunoPerformancePanel({ data }: Props) {
         <div className="rounded-xl border border-gray-100 bg-white p-4 shadow-sm">
           <div className="flex items-center gap-2 text-gray-500 text-sm mb-1">
             <TrendingUp className="h-4 w-4" />
-            Tua media
+            {prof ? "Media do aluno" : "Tua media"}
           </div>
           <p className="font-display text-2xl font-bold text-[#1D4ED8] tabular-nums">
             {fmtNum(data.myOverallAverage)}
@@ -83,7 +90,9 @@ export function AlunoPerformancePanel({ data }: Props) {
           <p className="text-xs text-gray-400 mt-1">Nas atividades com nota</p>
         </div>
         <div className="rounded-xl border border-gray-100 bg-white p-4 shadow-sm">
-          <div className="text-gray-500 text-sm mb-1">Tua media % do maximo</div>
+          <div className="text-gray-500 text-sm mb-1">
+            {prof ? "Media % do maximo (aluno)" : "Tua media % do maximo"}
+          </div>
           <p className="font-display text-2xl font-bold text-gray-900 tabular-nums">
             {data.myOverallPercent != null
               ? `${fmtNum(data.myOverallPercent)}%`
@@ -102,7 +111,9 @@ export function AlunoPerformancePanel({ data }: Props) {
       {lineData.length > 0 ? (
         <div className="rounded-xl border border-gray-100 bg-white p-4">
           <h3 className="font-display font-semibold text-gray-900 mb-4 text-sm">
-            Evolucao das tuas notas (por data de envio)
+            {prof
+              ? "Evolucao das notas do aluno (por data de envio)"
+              : "Evolucao das tuas notas (por data de envio)"}
           </h3>
           <div className="h-[240px] w-full min-w-0">
             <ResponsiveContainer width="100%" height="100%">
@@ -133,7 +144,9 @@ export function AlunoPerformancePanel({ data }: Props) {
             <thead>
               <tr className="bg-gray-50 text-left text-gray-600">
                 <th className="px-4 py-2 font-medium">Atividade</th>
-                <th className="px-4 py-2 font-medium tabular-nums">Tua nota</th>
+                <th className="px-4 py-2 font-medium tabular-nums">
+                  {prof ? "Nota do aluno" : "Tua nota"}
+                </th>
                 <th className="px-4 py-2 font-medium tabular-nums">% max</th>
                 <th className="px-4 py-2 font-medium tabular-nums">Media turma</th>
                 <th className="px-4 py-2 font-medium">Vs turma</th>

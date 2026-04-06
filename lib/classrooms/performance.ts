@@ -66,3 +66,20 @@ export type StudentSelfPerformance = {
   activities: SelfActivityPerformance[]
   error: string | null
 }
+
+/** Visão do professor: desempenho de um aluno numa sala (mesma estrutura que StudentSelfPerformance). */
+export type ProfessorStudentClassroomOverview = {
+  classroomId: string
+  name: string
+  subject: string
+  educationLevel: string
+  joinedAt: string | null
+  performance: StudentSelfPerformance
+}
+
+export type ProfessorStudentOverview = {
+  studentId: string
+  fullName: string | null
+  classrooms: ProfessorStudentClassroomOverview[]
+  error: string | null
+}

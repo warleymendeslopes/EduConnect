@@ -1,0 +1,357 @@
+"use client"
+
+import {
+  deleteContentItem,
+  recordContentShare,
+  toggleContentLike,
+  type ProfessorContentListItem,
+} from "@/app/actions/content-items"
+import { ArticleCoverMedia } from "@/components/dashboard/article-cover-media"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog"
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import {
+  BookOpen,
+  Bookmark,
+  CheckCircle2,
+  Clock,
+  Heart,
+  Loader2,
+  MessageCircle,
+  Pencil,
+  Share2,
+  Sparkles,
+  Trash2,
+} from "lucide-react"
+import Link from "next/link"
+import { useRouter } from "next/navigation"
+import { useMemo, useState } from "react"
+import { toast } from "sonner"
+
+const stories = [
+  { id: 1, name: "Prof. Maria", avatar: "MS", color: "from-pink-500 to-purple-500", hasNew: true },
+  { id: 2, name: "Prof. Carlos", avatar: "CO", color: "from-blue-500 to-cyan-500", hasNew: true },
+  { id: 3, name: "Prof. Ana", avatar: "AP", color: "from-green-500 to-teal-500", hasNew: false },
+  { id: 4, name: "Prof. Roberto", avatar: "RL", color: "from-orange-500 to-red-500", hasNew: true },
+  { id: 5, name: "Prof. Julia", avatar: "JC", color: "from-indigo-500 to-purple-500", hasNew: false },
+]
+
+type Props = {
+  authorName: string | null
+  authorAvatarUrl: string | null
+  initialItems: ProfessorContentListItem[]
+}
+
+function initials(name: string | null): string {
+  if (!name?.trim()) return "?"
+  const parts = name.trim().split(/\s+/)
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
+  }
+  return parts[0].slice(0, 2).toUpperCase()
+}
+
+export function ProfessorContentFeed({
+  authorName,
+  authorAvatarUrl,
+  initialItems,
+}: Props) {
+  const router = useRouter()
+  const items = useMemo(() => initialItems ?? [], [initialItems])
+  const [savedItems, setSavedItems] = useState<string[]>([])
+  const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [likedMap, setLikedMap] = useState<Record<string, boolean>>({})
+  const [counts, setCounts] = useState<Record<string, { likes: number; shares: number }>>(() => {
+    const o: Record<string, { likes: number; shares: number }> = {}
+    for (const a of items) {
+      o[a.id] = { likes: a.like_count, shares: a.share_count }
+    }
+    return o
+  })
+
+  const toggleSave = (id: string) => {
+    setSavedItems((prev) => (prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]))
+  }
+
+  const onLike = async (articleId: string) => {
+    const res = await toggleContentLike(articleId)
+    if (!res.ok) {
+      toast.error(res.error)
+      return
+    }
+    setLikedMap((prev) => ({ ...prev, [articleId]: res.liked }))
+    setCounts((prev) => ({
+      ...prev,
+      [articleId]: { ...prev[articleId], likes: res.likeCount },
+    }))
+  }
+
+  const onShare = async (articleId: string) => {
+    const url = `${typeof window !== "undefined" ? window.location.origin : ""}/conteudo/${articleId}`
+    try {
+      if (navigator.share) {
+        await navigator.share({ url })
+        const r = await recordContentShare(articleId, "native_share")
+        if (r.ok) {
+          setCounts((prev) => ({
+            ...prev,
+            [articleId]: { ...prev[articleId], shares: r.shareCount },
+          }))
+        }
+      } else {
+        await navigator.clipboard.writeText(url)
+        toast.success("Link copiado")
+        const r = await recordContentShare(articleId, "copy_link")
+        if (r.ok) {
+          setCounts((prev) => ({
+            ...prev,
+            [articleId]: { ...prev[articleId], shares: r.shareCount },
+          }))
+        }
+      }
+    } catch {
+      try {
+        await navigator.clipboard.writeText(url)
+        toast.success("Link copiado")
+        const r = await recordContentShare(articleId, "copy_link")
+        if (r.ok) {
+          setCounts((prev) => ({
+            ...prev,
+            [articleId]: { ...prev[articleId], shares: r.shareCount },
+          }))
+        }
+      } catch {
+        toast.error("Nao foi possivel copiar")
+      }
+    }
+  }
+
+  async function handleDelete(id: string) {
+    setDeletingId(id)
+    const res = await deleteContentItem(id)
+    setDeletingId(null)
+    if (!res.ok) {
+      toast.error(res.error)
+      return
+    }
+    toast.success("Conteudo excluido")
+    router.refresh()
+  }
+
+  return (
+    <>
+      <div className="bg-white rounded-xl p-4 border border-gray-100">
+        <div className="flex gap-4 overflow-x-auto pb-2 scrollbar-hide">
+          {stories.map((story) => (
+            <button
+              key={story.id}
+              type="button"
+              className="flex flex-col items-center gap-2 flex-shrink-0"
+            >
+              <div
+                className={`p-0.5 rounded-full bg-gradient-to-br ${story.color} ${story.hasNew ? "" : "opacity-50"}`}
+              >
+                <div className="p-0.5 rounded-full bg-white">
+                  <Avatar className="h-14 w-14">
+                    <AvatarFallback className="bg-gray-100 text-gray-600 text-sm">{story.avatar}</AvatarFallback>
+                  </Avatar>
+                </div>
+              </div>
+              <span className="text-xs text-gray-600 max-w-[60px] truncate">{story.name}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
+        <Button size="sm" className="bg-[#10B981] hover:bg-[#059669]">
+          Todos
+        </Button>
+        <Button size="sm" variant="outline">
+          Artigos
+        </Button>
+        <Button size="sm" variant="outline" disabled>
+          Videos
+        </Button>
+        <Button size="sm" variant="outline" disabled>
+          Exercicios
+        </Button>
+      </div>
+
+      <div className="space-y-4">
+        {items.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-gray-200 bg-white p-10 text-center">
+            <BookOpen className="h-12 w-12 text-gray-300 mx-auto mb-4" />
+            <p className="text-gray-900 font-medium mb-1">Nenhum artigo ainda</p>
+            <p className="text-sm text-gray-500 mb-6">
+              Quando publicar, seus posts aparecem aqui no mesmo formato do feed dos alunos.
+            </p>
+            <Button asChild className="bg-[#1D4ED8] hover:bg-[#1E3A8A]">
+              <Link href="/dashboard/professor/criar">Criar conteúdo</Link>
+            </Button>
+          </div>
+        ) : (
+          items.map((item) => {
+            const c = counts[item.id] ?? { likes: item.like_count, shares: item.share_count }
+            const liked = !!likedMap[item.id]
+            const disciplina = item.disciplina?.trim() || "Artigo"
+            const cover = item.coverUrl?.trim() || null
+            const coverVideo = item.coverVideoUrl?.trim() || null
+            const sparklesText =
+              item.status === "published"
+                ? "Artigo publicado na plataforma"
+                : "Rascunho — visivel so para voce"
+
+            return (
+              <div
+                key={item.id}
+                className="bg-white rounded-xl border border-gray-100 overflow-hidden"
+              >
+                <div className="p-4 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <Avatar className="h-10 w-10 shrink-0">
+                      {authorAvatarUrl ? <AvatarImage src={authorAvatarUrl} alt="" /> : null}
+                      <AvatarFallback className="bg-[#1D4ED8] text-white text-sm">
+                        {initials(authorName)}
+                      </AvatarFallback>
+                    </Avatar>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1 flex-wrap">
+                        <span className="font-medium text-gray-900">{authorName ?? "Voce"}</span>
+                        <CheckCircle2 className="h-4 w-4 text-[#10B981] shrink-0" aria-hidden />
+                        <Badge variant="secondary" className="text-xs">
+                          {disciplina}
+                        </Badge>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 gap-0.5">
+                    <Button variant="ghost" size="icon" className="h-9 w-9 text-[#1D4ED8]" asChild>
+                      <Link href={`/dashboard/professor/criar?edit=${item.id}`} title="Editar">
+                        <Pencil className="h-4 w-4" />
+                      </Link>
+                    </Button>
+                    <AlertDialog>
+                      <AlertDialogTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-9 w-9 text-red-600 hover:text-red-700 hover:bg-red-50"
+                          title="Excluir"
+                          disabled={deletingId === item.id}
+                        >
+                          {deletingId === item.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Trash2 className="h-4 w-4" />
+                          )}
+                        </Button>
+                      </AlertDialogTrigger>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>Excluir este conteúdo?</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            Esta ação não pode ser desfeita. Curtidas, partilhas e dados ligados a
+                            este artigo serão removidos.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>Cancelar</AlertDialogCancel>
+                          <AlertDialogAction
+                            className="bg-red-600 hover:bg-red-700"
+                            onClick={() => void handleDelete(item.id)}
+                          >
+                            Excluir
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+                  </div>
+                </div>
+
+                <div className="px-4 pb-3">
+                  <h3 className="font-display font-semibold text-lg text-gray-900 mb-2">{item.title}</h3>
+                  <div className="flex items-center gap-2 text-sm text-[#10B981] mb-3">
+                    <Sparkles className="h-4 w-4 shrink-0" />
+                    <span>{sparklesText}</span>
+                  </div>
+                  <div className="bg-gray-100 rounded-lg aspect-video flex items-center justify-center mb-3 overflow-hidden">
+                    {coverVideo || cover ? (
+                      <ArticleCoverMedia
+                        imageUrl={cover}
+                        videoUrl={coverVideo}
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <div className="flex flex-col items-center gap-2 text-gray-400">
+                        <BookOpen className="h-12 w-12" />
+                        <span className="text-sm flex items-center gap-1">
+                          <Clock className="h-4 w-4" />
+                          Leitura
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-between pt-3 border-t border-gray-100">
+                    <div className="flex items-center gap-4">
+                      <button
+                        type="button"
+                        className={`flex items-center gap-1 transition-colors ${liked ? "text-red-500" : "text-gray-600 hover:text-red-500"}`}
+                        onClick={() => void onLike(item.id)}
+                      >
+                        <Heart
+                          className={`h-5 w-5 shrink-0 ${liked ? "fill-red-500 stroke-red-500 text-red-500" : ""}`}
+                        />
+                        <span className="text-sm">{c.likes}</span>
+                      </button>
+                      <span className="flex items-center gap-1 text-gray-400 text-sm">
+                        <MessageCircle className="h-5 w-5" />
+                        <span>0</span>
+                      </span>
+                      <button
+                        type="button"
+                        className="text-gray-600 hover:text-[#1D4ED8] transition-colors"
+                        onClick={() => void onShare(item.id)}
+                      >
+                        <Share2 className="h-5 w-5" />
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => toggleSave(item.id)}
+                      className={`transition-colors ${savedItems.includes(item.id) ? "text-[#F59E0B]" : "text-gray-600 hover:text-[#F59E0B]"}`}
+                    >
+                      <span className="sr-only">Salvar</span>
+                      <Bookmark className={`h-5 w-5 ${savedItems.includes(item.id) ? "fill-current" : ""}`} />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="px-4 pb-4">
+                  <Button
+                    className="w-full bg-[#1D4ED8] hover:bg-[#1E3A8A]"
+                    onClick={() => router.push(`/conteudo/${item.id}`)}
+                  >
+                    Ler agora
+                  </Button>
+                </div>
+              </div>
+            )
+          })
+        )}
+      </div>
+    </>
+  )
+}

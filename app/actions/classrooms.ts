@@ -10,7 +10,16 @@ import {
   safeUploadFilename,
 } from "@/lib/activities/attachments"
 import { buildInviteCode, normalizeInviteCodeInput } from "@/lib/classrooms/invite-code"
-import type { ClassroomPreview, ClassroomRow, JoinClassroomResult } from "@/lib/classrooms/types"
+import {
+  displayProfessorStudentName,
+} from "@/lib/classrooms/professor-students-display"
+import type {
+  ClassroomPreview,
+  ClassroomRow,
+  JoinClassroomResult,
+  ProfessorStudentClassroomRef,
+  ProfessorStudentRow,
+} from "@/lib/classrooms/types"
 
 const MAX_CREATE_ATTEMPTS = 8
 
@@ -369,6 +378,225 @@ export async function listMembersForClassroom(classroomId: string): Promise<{
   return { members, error: null }
 }
 
+const PROFESSOR_STUDENTS_DEFAULT_PAGE_SIZE = 25
+const PROFESSOR_STUDENTS_MAX_PAGE_SIZE = 100
+
+function professorStudentMatchesSearch(
+  row: ProfessorStudentRow,
+  searchRaw: string
+): boolean {
+  const needle = searchRaw.trim().toLowerCase()
+  if (!needle) return true
+  const name = displayProfessorStudentName(
+    row.fullName,
+    row.studentId
+  ).toLowerCase()
+  if (name.includes(needle)) return true
+  if (row.studentId.toLowerCase().includes(needle)) return true
+  return false
+}
+
+export type ListStudentsAcrossClassroomsOptions = {
+  /** Filtro por nome (ou parte do id); case-insensitive */
+  search?: string
+  page?: number
+  pageSize?: number
+}
+
+export type ListStudentsAcrossClassroomsResult = {
+  rows: ProfessorStudentRow[]
+  total: number
+  page: number
+  pageSize: number
+  error: string | null
+}
+
+/** Todos os alunos distintos nas salas do professor, com lista de turmas por aluno. Suporta filtro e paginação. */
+export async function listStudentsAcrossClassroomsForProfessor(
+  opts?: ListStudentsAcrossClassroomsOptions
+): Promise<ListStudentsAcrossClassroomsResult> {
+  const supabase = await createClient()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+  if (!user) {
+    return {
+      rows: [],
+      total: 0,
+      page: 1,
+      pageSize: PROFESSOR_STUDENTS_DEFAULT_PAGE_SIZE,
+      error: "Nao autenticado",
+    }
+  }
+
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("user_type")
+    .eq("id", user.id)
+    .maybeSingle()
+
+  if (profile?.user_type !== "professor") {
+    return {
+      rows: [],
+      total: 0,
+      page: 1,
+      pageSize: PROFESSOR_STUDENTS_DEFAULT_PAGE_SIZE,
+      error: "Apenas professores",
+    }
+  }
+
+  const pageSizeRaw = opts?.pageSize ?? PROFESSOR_STUDENTS_DEFAULT_PAGE_SIZE
+  const pageSize = Math.min(
+    PROFESSOR_STUDENTS_MAX_PAGE_SIZE,
+    Math.max(1, Math.floor(pageSizeRaw) || PROFESSOR_STUDENTS_DEFAULT_PAGE_SIZE)
+  )
+  const pageRaw = opts?.page ?? 1
+  const page = Math.max(1, Math.floor(pageRaw) || 1)
+  const search = opts?.search?.trim() ?? ""
+
+  const { data: rooms, error: roomErr } = await supabase
+    .from("classrooms")
+    .select("id, name, subject")
+    .eq("professor_id", user.id)
+    .order("name", { ascending: true })
+
+  if (roomErr) {
+    return {
+      rows: [],
+      total: 0,
+      page: 1,
+      pageSize,
+      error: roomErr.message,
+    }
+  }
+
+  const roomList = rooms ?? []
+  if (roomList.length === 0) {
+    return {
+      rows: [],
+      total: 0,
+      page: 1,
+      pageSize,
+      error: null,
+    }
+  }
+
+  const roomMeta = new Map<string, ProfessorStudentClassroomRef>()
+  for (const r of roomList) {
+    roomMeta.set(r.id as string, {
+      id: r.id as string,
+      name: (r.name as string) ?? "",
+      subject: (r.subject as string) ?? "",
+    })
+  }
+
+  const classroomIds = roomList.map((r) => r.id as string)
+
+  const { data: memberRows, error: memErr } = await supabase
+    .from("classroom_members")
+    .select("student_id, classroom_id")
+    .in("classroom_id", classroomIds)
+
+  if (memErr || !memberRows) {
+    return {
+      rows: [],
+      total: 0,
+      page: 1,
+      pageSize,
+      error: memErr?.message ?? "Erro ao listar matriculas",
+    }
+  }
+
+  const byStudent = new Map<string, Map<string, ProfessorStudentClassroomRef>>()
+  for (const row of memberRows) {
+    const sid = row.student_id as string
+    const cid = row.classroom_id as string
+    const meta = roomMeta.get(cid)
+    if (!meta) continue
+    let inner = byStudent.get(sid)
+    if (!inner) {
+      inner = new Map()
+      byStudent.set(sid, inner)
+    }
+    inner.set(cid, meta)
+  }
+
+  const studentIds = [...byStudent.keys()]
+  if (studentIds.length === 0) {
+    return {
+      rows: [],
+      total: 0,
+      page: 1,
+      pageSize,
+      error: null,
+    }
+  }
+
+  const CHUNK = 500
+  const profiles: { id: string; full_name: string | null }[] = []
+  for (let i = 0; i < studentIds.length; i += CHUNK) {
+    const chunk = studentIds.slice(i, i + CHUNK)
+    const { data: profChunk, error: profErr } = await supabase
+      .from("profiles")
+      .select("id, full_name")
+      .in("id", chunk)
+
+    if (profErr) {
+      return {
+        rows: [],
+        total: 0,
+        page: 1,
+        pageSize,
+        error: profErr.message,
+      }
+    }
+    for (const p of profChunk ?? []) {
+      profiles.push({
+        id: p.id as string,
+        full_name: (p.full_name as string | null) ?? null,
+      })
+    }
+  }
+
+  const nameById = new Map(profiles.map((p) => [p.id, p.full_name]))
+
+  const rows: ProfessorStudentRow[] = studentIds.map((studentId) => {
+    const classMap = byStudent.get(studentId)!
+    const classrooms = [...classMap.values()].sort((a, b) =>
+      a.name.localeCompare(b.name, "pt-BR")
+    )
+    return {
+      studentId,
+      fullName: nameById.get(studentId) ?? null,
+      classrooms,
+    }
+  })
+
+  rows.sort((a, b) => {
+    const na = displayProfessorStudentName(a.fullName, a.studentId).toLocaleLowerCase()
+    const nb = displayProfessorStudentName(b.fullName, b.studentId).toLocaleLowerCase()
+    return na.localeCompare(nb, "pt-BR")
+  })
+
+  const filtered = search
+    ? rows.filter((r) => professorStudentMatchesSearch(r, search))
+    : rows
+
+  const total = filtered.length
+  const totalPages = Math.max(1, Math.ceil(total / pageSize) || 1)
+  const safePage = Math.min(page, totalPages)
+  const start = (safePage - 1) * pageSize
+  const pageRows = filtered.slice(start, start + pageSize)
+
+  return {
+    rows: pageRows,
+    total,
+    page: safePage,
+    pageSize,
+    error: null,
+  }
+}
+
 export async function getClassroomPreviewByInviteCode(rawCode: string): Promise<{
   preview: ClassroomPreview | null
   error: string | null
@@ -429,6 +657,7 @@ export async function removeClassroomMember(
   if (error) return { ok: false, error: error.message }
   revalidatePath(`/dashboard/professor/salas/${classroomId}`)
   revalidatePath("/dashboard/professor/salas")
+  revalidatePath("/dashboard/professor/alunos")
   return { ok: true }
 }
 
