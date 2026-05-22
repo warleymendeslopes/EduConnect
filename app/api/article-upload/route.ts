@@ -1,13 +1,14 @@
 import {
   uploadArticleCoverImage,
   uploadArticleCoverVideo,
+  uploadDicaImage,
   uploadTrixArticleImage,
 } from "@/app/actions/content-items"
 import { NextResponse } from "next/server"
 
 export const runtime = "nodejs"
 
-const KINDS = new Set(["trix", "cover-image", "cover-video"])
+const KINDS = new Set(["trix", "cover-image", "cover-video", "dica-image"])
 
 export async function POST(request: Request) {
   let formData: FormData
@@ -39,6 +40,8 @@ export async function POST(request: Request) {
     result = await uploadTrixArticleImage(contentItemId, uploadForm)
   } else if (kind === "cover-image") {
     result = await uploadArticleCoverImage(contentItemId, uploadForm)
+  } else if (kind === "dica-image") {
+    result = await uploadDicaImage(contentItemId, uploadForm)
   } else {
     result = await uploadArticleCoverVideo(contentItemId, uploadForm)
   }

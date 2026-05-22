@@ -26,6 +26,9 @@ export default async function ProfessorMeuFeedPage() {
   const items = await listMyContentItemsForProfessor()
   const publishedCount = items.filter((i) => i.status === "published").length
   const draftCount = items.filter((i) => i.status === "draft").length
+  const reviewCount = items.filter((i) =>
+    i.status === "verificando" || i.status === "revisao" || i.status === "aguardando_decisao"
+  ).length
 
   return (
     <div className="max-w-4xl mx-auto pb-20 lg:pb-0 px-4">
@@ -56,6 +59,7 @@ export default async function ProfessorMeuFeedPage() {
           totalPosts={items.length}
           publishedCount={publishedCount}
           draftCount={draftCount}
+          reviewCount={reviewCount}
         />
       </div>
     </div>

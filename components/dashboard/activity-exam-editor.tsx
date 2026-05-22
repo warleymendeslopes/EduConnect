@@ -18,6 +18,9 @@ import { GripVertical, Plus, Trash2 } from "lucide-react"
 type Props = {
   value: ActivityExamDefinition | null
   onChange: (exam: ActivityExamDefinition | null) => void
+  /** Simulado: select de disciplina por questao */
+  showDisciplinaPerQuestion?: boolean
+  disciplinaOptions?: string[]
 }
 
 function emptyMcq(order: number): ExamQuestionMcq {
@@ -46,7 +49,12 @@ function normalizeOrders(questions: ExamQuestion[]): ExamQuestion[] {
   return questions.map((q, i) => ({ ...q, order: i + 1 }))
 }
 
-export function ActivityExamEditor({ value, onChange }: Props) {
+export function ActivityExamEditor({
+  value,
+  onChange,
+  showDisciplinaPerQuestion = false,
+  disciplinaOptions = [],
+}: Props) {
   const questions = value?.questions ?? []
 
   const setQuestions = (next: ExamQuestion[]) => {
@@ -184,6 +192,29 @@ export function ActivityExamEditor({ value, onChange }: Props) {
                   </Button>
                 </div>
               </div>
+
+              {showDisciplinaPerQuestion && disciplinaOptions.length > 0 ? (
+                <div className="grid gap-2 max-w-md">
+                  <Label>Disciplina</Label>
+                  <select
+                    className="h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    value={q.disciplina ?? ""}
+                    onChange={(e) => {
+                      const v = e.target.value.trim()
+                      updateQuestion(q.id, {
+                        disciplina: v ? v : undefined,
+                      })
+                    }}
+                  >
+                    <option value="">Selecione a disciplina...</option>
+                    {disciplinaOptions.map((d) => (
+                      <option key={d} value={d}>
+                        {d}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : null}
 
               <div className="grid gap-2">
                 <Label>Enunciado</Label>

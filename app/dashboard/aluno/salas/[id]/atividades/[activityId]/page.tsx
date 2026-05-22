@@ -148,6 +148,7 @@ export default async function AlunoAtividadeDetalhePage({
 
         {examPublic ? (
           <StudentActivityExam
+            target="classroom"
             classroomId={classroomId}
             activityId={activityId}
             exam={examPublic}

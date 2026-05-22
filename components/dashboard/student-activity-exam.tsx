@@ -2,29 +2,39 @@
 
 import { useMemo, useState, useTransition } from "react"
 import {
+  getMyContentExerciseSubmission,
+  saveContentExerciseDraft,
+  submitContentExercise,
+} from "@/app/actions/content-exercise-submissions"
+import {
   getMySubmission,
   saveSubmissionDraft,
   submitExam,
 } from "@/app/actions/activity-submissions"
 import type { ActivityExamPublic } from "@/lib/activities/exam"
 import type { StudentExamAnswers } from "@/lib/activities/exam"
+import type { ContentExerciseSubmissionRow } from "@/app/actions/content-exercise-submissions"
 import type { ActivitySubmissionRow } from "@/app/actions/activity-submissions"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { CheckCircle2, XCircle } from "lucide-react"
 import { toast } from "sonner"
 import { useRouter } from "next/navigation"
 
+type SubmissionUnion = ActivitySubmissionRow | ContentExerciseSubmissionRow
+
 type Props = {
-  classroomId: string
-  activityId: string
   exam: ActivityExamPublic
-  initialSubmission: ActivitySubmissionRow | null
+  initialSubmission: SubmissionUnion | null
   activityClosed: boolean
   maxScore: number | null
   /** Após envio: questionId -> índice da opção correta (só vem do servidor nesse estado). */
   mcqSolutionsAfterSubmit?: Record<string, number>
-}
+} & (
+  | { target: "classroom"; classroomId: string; activityId: string }
+  | { target: "content"; contentItemId: string }
+)
 
 function McqFeedbackBlock({
   options,
@@ -121,7 +131,7 @@ function OpenQuestionGrade({
 
 function buildInitialAnswers(
   exam: ActivityExamPublic,
-  submission: ActivitySubmissionRow | null
+  submission: SubmissionUnion | null
 ): StudentExamAnswers {
   const from = submission?.answers ?? {}
   const out: StudentExamAnswers = {}
@@ -143,17 +153,16 @@ function buildInitialAnswers(
 }
 
 export function StudentActivityExam({
-  classroomId,
-  activityId,
   exam,
   initialSubmission,
   activityClosed,
   maxScore,
   mcqSolutionsAfterSubmit,
+  ...targetProps
 }: Props) {
   const router = useRouter()
   const [pending, startTransition] = useTransition()
-  const [submission, setSubmission] = useState<ActivitySubmissionRow | null>(
+  const [submission, setSubmission] = useState<SubmissionUnion | null>(
     initialSubmission
   )
   const [answers, setAnswers] = useState<StudentExamAnswers>(() =>
@@ -174,10 +183,23 @@ export function StudentActivityExam({
 
   const refreshSubmission = () => {
     startTransition(async () => {
-      const { submission: s } = await getMySubmission(classroomId, activityId)
-      if (s) {
-        setSubmission(s)
-        setAnswers(buildInitialAnswers(exam, s))
+      if (targetProps.target === "content") {
+        const { submission: s } = await getMyContentExerciseSubmission(
+          targetProps.contentItemId
+        )
+        if (s) {
+          setSubmission(s)
+          setAnswers(buildInitialAnswers(exam, s))
+        }
+      } else {
+        const { submission: s } = await getMySubmission(
+          targetProps.classroomId,
+          targetProps.activityId
+        )
+        if (s) {
+          setSubmission(s)
+          setAnswers(buildInitialAnswers(exam, s))
+        }
       }
       router.refresh()
     })
@@ -189,7 +211,14 @@ export function StudentActivityExam({
 
   const handleSaveDraft = () => {
     startTransition(async () => {
-      const res = await saveSubmissionDraft(classroomId, activityId, answers)
+      const res =
+        targetProps.target === "content"
+          ? await saveContentExerciseDraft(targetProps.contentItemId, answers)
+          : await saveSubmissionDraft(
+              targetProps.classroomId,
+              targetProps.activityId,
+              answers
+            )
       if (!res.ok) {
         toast.error(res.error)
         return
@@ -204,7 +233,14 @@ export function StudentActivityExam({
       return
     }
     startTransition(async () => {
-      const res = await submitExam(classroomId, activityId, answers)
+      const res =
+        targetProps.target === "content"
+          ? await submitContentExercise(targetProps.contentItemId, answers)
+          : await submitExam(
+              targetProps.classroomId,
+              targetProps.activityId,
+              answers
+            )
       if (!res.ok) {
         toast.error(res.error)
         return
@@ -263,6 +299,11 @@ export function StudentActivityExam({
         {exam.questions.map((q, i) => (
           <li key={q.id} className="pl-1">
             <div className="inline-block w-full max-w-full align-top">
+              {q.disciplina ? (
+                <Badge variant="secondary" className="mb-2">
+                  {q.disciplina}
+                </Badge>
+              ) : null}
               <p className="text-sm font-medium text-gray-900 mb-2">
                 {i + 1}. {q.prompt}{" "}
                 <span className="text-gray-500 font-normal">

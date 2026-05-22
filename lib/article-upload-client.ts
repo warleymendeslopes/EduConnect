@@ -1,6 +1,10 @@
 /** Upload de blobs de artigo via Route Handler (evita limite de 1 MB das Server Actions com multipart). */
 
-export type ArticleUploadKind = "trix" | "cover-image" | "cover-video"
+export type ArticleUploadKind =
+  | "trix"
+  | "cover-image"
+  | "cover-video"
+  | "dica-image"
 
 export type ArticleUploadResult =
   | { ok: true; displayUrl: string; pathname: string }

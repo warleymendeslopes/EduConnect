@@ -1,0 +1,172 @@
+import { createClient } from "@supabase/supabase-js"
+import type { ContentReviewFinding } from "./types"
+
+const XAI_API_URL = "https://api.x.ai/v1/chat/completions"
+
+function toPlainText(html: string): string {
+  return html
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+const SYSTEM_PROMPT = `Você é um agente de moderação da EduConnect, plataforma educacional brasileira para professores e alunos.
+
+Revise o artigo educacional enviado usando seu conhecimento interno e retorne uma análise estruturada em JSON.
+
+CRITÉRIOS DE PONTUAÇÃO (total 0-100):
+1. Verificação de Fatos (0-30 pts): Com base no seu conhecimento, verifique se as principais afirmações são verdadeiras e precisas.
+2. Originalidade / Plágio (0-30 pts): Avalie se o texto parece original ou se é uma cópia de conteúdo amplamente conhecido sem atribuição.
+3. Conteúdo Adequado (0-20 pts): Ausência de material ilícito, ofensivo, discriminatório ou inadequado para uma plataforma educacional.
+4. Qualidade Educacional (0-20 pts): Clareza, profundidade, estrutura e relevância pedagógica do conteúdo.
+
+Retorne APENAS um objeto JSON válido, sem markdown, sem texto antes ou depois:
+{
+  "score": <inteiro 0-100>,
+  "seal": <"none" | "excellence">,
+  "findings": [
+    {
+      "category": <"fact_check" | "plagiarism" | "illegal_content" | "quality">,
+      "severity": <"ok" | "warning" | "critical">,
+      "description": <string em português, máximo 200 caracteres>
+    }
+  ],
+  "warning_reason": <string em português resumindo os problemas encontrados, ou null se score >= 80>
+}
+
+Regras obrigatórias:
+- "seal" deve ser "excellence" apenas se score > 80; caso contrário "none".
+- "warning_reason" deve ser null se score >= 80.
+- Inclua ao menos um finding por categoria avaliada.`
+
+interface XaiRawReview {
+  score: unknown
+  seal: unknown
+  findings: unknown
+  warning_reason: unknown
+}
+
+function parseReview(raw: XaiRawReview): {
+  score: number
+  seal: "none" | "excellence"
+  findings: ContentReviewFinding[]
+  warningReason: string | null
+} {
+  const score = Math.max(0, Math.min(100, Math.round(Number(raw.score) || 0)))
+  const seal = score > 80 ? "excellence" : "none"
+
+  const findings: ContentReviewFinding[] = Array.isArray(raw.findings)
+    ? (raw.findings as ContentReviewFinding[]).filter(
+        (f) =>
+          typeof f === "object" &&
+          f !== null &&
+          ["fact_check", "plagiarism", "illegal_content", "quality"].includes(f.category) &&
+          ["ok", "warning", "critical"].includes(f.severity) &&
+          typeof f.description === "string"
+      )
+    : []
+
+  const warningReason =
+    score >= 80
+      ? null
+      : typeof raw.warning_reason === "string" && raw.warning_reason.trim()
+        ? raw.warning_reason.trim()
+        : null
+
+  return { score, seal, findings, warningReason }
+}
+
+export async function runArticleReview(contentItemId: string): Promise<void> {
+  const supabase = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  )
+
+  const { data: item } = await supabase
+    .from("content_items")
+    .select("id, title, body_html")
+    .eq("id", contentItemId)
+    .eq("status", "verificando")
+    .maybeSingle()
+
+  if (!item) return
+
+  const plainText = toPlainText(item.body_html ?? "")
+  const userMessage = `Título: ${item.title}\n\nConteúdo:\n${plainText.slice(0, 8000)}`
+
+  let score: number
+  let seal: "none" | "excellence"
+  let findings: ContentReviewFinding[]
+  let warningReason: string | null
+
+  try {
+    const res = await fetch(XAI_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.XAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "grok-3-mini",
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userMessage },
+        ],
+        temperature: 0.1,
+      }),
+    })
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "")
+      throw new Error(`xAI status ${res.status}: ${body.slice(0, 200)}`)
+    }
+
+    const data = await res.json()
+    const content: string = data.choices?.[0]?.message?.content ?? "{}"
+    // extrair JSON mesmo que o modelo envolva em markdown ```json ... ```
+    const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/)
+    const jsonStr = jsonMatch ? jsonMatch[1].trim() : content.trim()
+    const raw = JSON.parse(jsonStr) as XaiRawReview
+    ;({ score, seal, findings, warningReason } = parseReview(raw))
+  } catch (err) {
+    console.error("[review-agent] Erro ao chamar xAI:", err)
+    // Falha técnica: devolve para rascunho para o professor tentar novamente
+    await supabase
+      .from("content_items")
+      .update({ status: "draft" })
+      .eq("id", contentItemId)
+    return
+  }
+
+  // Determinar novo status baseado na pontuação
+  const newStatus =
+    score < 50 ? "revisao" : score <= 80 ? "aguardando_decisao" : "published"
+
+  await supabase.from("content_review_results").upsert(
+    {
+      content_item_id: contentItemId,
+      score,
+      seal,
+      findings,
+      warning_reason: warningReason,
+      reviewed_at: new Date().toISOString(),
+    },
+    { onConflict: "content_item_id" }
+  )
+
+  const statusPatch: Record<string, unknown> = { status: newStatus }
+  if (newStatus === "published") {
+    statusPatch.published_at = new Date().toISOString()
+  }
+
+  await supabase
+    .from("content_items")
+    .update(statusPatch)
+    .eq("id", contentItemId)
+}

@@ -1,11 +1,31 @@
 "use client"
 
 import {
+  closeContentAssessment,
   createArticleDraft,
-  getArticleForEdit,
+  createAssessmentDraft,
+  createDicaDraft,
+  createExerciseDraft,
+  createSimuladoDraft,
   listMyClassroomsForArticle,
+  loadProfessorContentForEdit,
   publishArticle,
+  publishAssessment,
+  publishDica,
+  publishExercise,
+  publishSimulado,
+  saveAssessmentDraft,
+  saveDicaDraft,
+  saveExerciseDraft,
+  saveSimuladoDraft,
 } from "@/app/actions/content-items"
+import {
+  getMyContentReview,
+  professorDecideAfterReview,
+} from "@/app/actions/content-review"
+import { ContentReviewDialog } from "@/components/dashboard/content-review-dialog"
+import type { ContentReviewResult } from "@/lib/content/types"
+import { ActivityExamEditor } from "@/components/dashboard/activity-exam-editor"
 import { uploadArticleBlobViaApi } from "@/lib/article-upload-client"
 import { ArticleCoverMedia } from "@/components/dashboard/article-cover-media"
 import { TrixArticleBody } from "@/components/dashboard/trix-article-body"
@@ -21,7 +41,14 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
-import type { ContentVisibility } from "@/lib/content/types"
+import { DICA_MAX_IMAGES, type ContentVisibility } from "@/lib/content/types"
+import {
+  parseExamFromSettings,
+  totalExamPoints,
+  type ActivityExamDefinition,
+} from "@/lib/activities/exam"
+import { datetimeLocalToIso, isoToDatetimeLocal } from "@/lib/datetime-local"
+import { cn } from "@/lib/utils"
 import {
   AlertTriangle,
   ArrowLeft,
@@ -39,6 +66,7 @@ import {
   Upload,
   Video,
   X,
+  XCircle,
 } from "lucide-react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
@@ -102,6 +130,93 @@ function getOrCreateArticleDraftId(): Promise<string> {
   return articleDraftCreationPromise
 }
 
+let exerciseDraftCreationPromise: Promise<string> | null = null
+
+function resetExerciseDraftCreation() {
+  exerciseDraftCreationPromise = null
+}
+
+function getOrCreateExerciseDraftId(): Promise<string> {
+  if (!exerciseDraftCreationPromise) {
+    exerciseDraftCreationPromise = createExerciseDraft().then((res) => {
+      if (!res.ok) {
+        resetExerciseDraftCreation()
+        throw new Error(res.error)
+      }
+      return res.id
+    })
+  }
+  return exerciseDraftCreationPromise
+}
+
+let assessmentDraftCreationPromise: Promise<string> | null = null
+
+function resetAssessmentDraftCreation() {
+  assessmentDraftCreationPromise = null
+}
+
+function getOrCreateAssessmentDraftId(): Promise<string> {
+  if (!assessmentDraftCreationPromise) {
+    assessmentDraftCreationPromise = createAssessmentDraft().then((res) => {
+      if (!res.ok) {
+        resetAssessmentDraftCreation()
+        throw new Error(res.error)
+      }
+      return res.id
+    })
+  }
+  return assessmentDraftCreationPromise
+}
+
+let simuladoDraftCreationPromise: Promise<string> | null = null
+
+function resetSimuladoDraftCreation() {
+  simuladoDraftCreationPromise = null
+}
+
+function getOrCreateSimuladoDraftId(): Promise<string> {
+  if (!simuladoDraftCreationPromise) {
+    simuladoDraftCreationPromise = createSimuladoDraft().then((res) => {
+      if (!res.ok) {
+        resetSimuladoDraftCreation()
+        throw new Error(res.error)
+      }
+      return res.id
+    })
+  }
+  return simuladoDraftCreationPromise
+}
+
+function htmlToPlainDicaDesc(html: string | null | undefined): string {
+  if (!html?.trim()) return ""
+  return html
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>\s*<p>/gi, "\n\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<p[^>]*>/gi, "")
+    .replace(/<[^>]+>/g, "")
+    .trim()
+}
+
+let dicaDraftCreationPromise: Promise<string> | null = null
+
+function resetDicaDraftCreation() {
+  dicaDraftCreationPromise = null
+}
+
+function getOrCreateDicaDraftId(): Promise<string> {
+  if (!dicaDraftCreationPromise) {
+    dicaDraftCreationPromise = createDicaDraft().then((res) => {
+      if (!res.ok) {
+        resetDicaDraftCreation()
+        throw new Error(res.error)
+      }
+      return res.id
+    })
+  }
+  return dicaDraftCreationPromise
+}
+
 export function CriarConteudoClient({
   initialEditId,
 }: {
@@ -112,7 +227,7 @@ export function CriarConteudoClient({
     initialEditId ? "editor" : "tipo"
   )
   const [tipoSelecionado, setTipoSelecionado] = useState<string | null>(() =>
-    initialEditId ? "artigo" : null
+    initialEditId ? null : null
   )
   const [isReviewing, setIsReviewing] = useState(false)
   const [showReviewDialog, setShowReviewDialog] = useState(false)
@@ -127,6 +242,8 @@ export function CriarConteudoClient({
   })
 
   const [aiReview, setAiReview] = useState<AIReview | null>(null)
+  const [reviewResult, setReviewResult] = useState<ContentReviewResult | null>(null)
+  const [showEditorReviewDialog, setShowEditorReviewDialog] = useState(false)
 
   const [articleDraftId, setArticleDraftId] = useState<string | null>(null)
   const [articleBodyHtml, setArticleBodyHtml] = useState("")
@@ -136,11 +253,28 @@ export function CriarConteudoClient({
   const [publishing, setPublishing] = useState(false)
   const [loadingEdit, setLoadingEdit] = useState(!!initialEditId)
   const [loadedArticleStatus, setLoadedArticleStatus] = useState<
-    "draft" | "published" | null
+    "draft" | "published" | "verificando" | "revisao" | "aguardando_decisao" | null
   >(null)
   const [coverUrl, setCoverUrl] = useState<string | null>(null)
   const [coverVideoUrl, setCoverVideoUrl] = useState<string | null>(null)
   const [coverUploading, setCoverUploading] = useState(false)
+
+  const [exerciseDraftId, setExerciseDraftId] = useState<string | null>(null)
+  const [assessmentDraftId, setAssessmentDraftId] = useState<string | null>(null)
+  const [examDef, setExamDef] = useState<ActivityExamDefinition | null>(null)
+  const [exerciseIntroHtml, setExerciseIntroHtml] = useState("")
+  const [assessmentIntroHtml, setAssessmentIntroHtml] = useState("")
+  const [simuladoDraftId, setSimuladoDraftId] = useState<string | null>(null)
+  const [simuladoIntroHtml, setSimuladoIntroHtml] = useState("")
+  const [startsAtLocal, setStartsAtLocal] = useState("")
+  const [dueAtLocal, setDueAtLocal] = useState("")
+  const [assessmentClosed, setAssessmentClosed] = useState(false)
+  const [closingAssessment, setClosingAssessment] = useState(false)
+
+  const [dicaDraftId, setDicaDraftId] = useState<string | null>(null)
+  const [dicaBodyText, setDicaBodyText] = useState("")
+  const [dicaVideoUrl, setDicaVideoUrl] = useState<string | null>(null)
+  const [dicaImageUrls, setDicaImageUrls] = useState<string[]>([])
 
   const ensureArticleDraftId = useCallback(async () => {
     if (articleDraftId) return articleDraftId
@@ -148,6 +282,27 @@ export function CriarConteudoClient({
     setArticleDraftId(id)
     return id
   }, [articleDraftId])
+
+  const ensureExerciseDraftId = useCallback(async () => {
+    if (exerciseDraftId) return exerciseDraftId
+    const id = await getOrCreateExerciseDraftId()
+    setExerciseDraftId(id)
+    return id
+  }, [exerciseDraftId])
+
+  const ensureAssessmentDraftId = useCallback(async () => {
+    if (assessmentDraftId) return assessmentDraftId
+    const id = await getOrCreateAssessmentDraftId()
+    setAssessmentDraftId(id)
+    return id
+  }, [assessmentDraftId])
+
+  const ensureSimuladoDraftId = useCallback(async () => {
+    if (simuladoDraftId) return simuladoDraftId
+    const id = await getOrCreateSimuladoDraftId()
+    setSimuladoDraftId(id)
+    return id
+  }, [simuladoDraftId])
 
   useEffect(() => {
     if (!initialEditId) {
@@ -157,7 +312,7 @@ export function CriarConteudoClient({
     let cancelled = false
     setLoadingEdit(true)
     void listMyClassroomsForArticle().then(setClassrooms)
-    void getArticleForEdit(initialEditId).then((res) => {
+    void loadProfessorContentForEdit(initialEditId).then((res) => {
       if (cancelled) return
       if (!res.ok) {
         toast.error(res.error)
@@ -165,21 +320,115 @@ export function CriarConteudoClient({
         router.replace("/dashboard/professor/criar")
         return
       }
-      const a = res.article
-      setArticleDraftId(a.id)
-      setArticleBodyHtml(a.body_html ?? "")
-      setFormData({
-        titulo: a.title,
-        disciplina: a.settings.disciplina ?? "",
-        nivel: a.settings.nivel ?? "",
-        conteudo: "",
-      })
-      setTags(a.settings.tags ?? [])
-      setVisibility(a.visibility)
-      setSelectedClassroomIds(a.classroomIds)
-      setLoadedArticleStatus(a.status)
-      setCoverUrl(a.settings.coverUrl ?? null)
-      setCoverVideoUrl(a.settings.coverVideoUrl ?? null)
+      if (res.kind === "article") {
+        const a = res.article
+        setTipoSelecionado("artigo")
+        setArticleDraftId(a.id)
+        setArticleBodyHtml(a.body_html ?? "")
+        setFormData({
+          titulo: a.title,
+          disciplina: a.settings.disciplina ?? "",
+          nivel: a.settings.nivel ?? "",
+          conteudo: "",
+        })
+        setTags(a.settings.tags ?? [])
+        setVisibility(a.visibility)
+        setSelectedClassroomIds(a.classroomIds)
+        setLoadedArticleStatus(a.status)
+        setCoverUrl(a.settings.coverUrl ?? null)
+        setCoverVideoUrl(a.settings.coverVideoUrl ?? null)
+        if (a.status === "revisao" || a.status === "aguardando_decisao") {
+          void getMyContentReview(a.id).then((r) => {
+            if (!cancelled) setReviewResult(r)
+          })
+        }
+      } else if (res.kind === "dica") {
+        const d = res.dica
+        setTipoSelecionado("dica")
+        setDicaDraftId(d.id)
+        setDicaBodyText(htmlToPlainDicaDesc(d.body_html))
+        const ds = d.settings
+        setDicaVideoUrl(ds.dicaVideoUrl?.trim() || null)
+        setDicaImageUrls(
+          Array.isArray(ds.dicaImageUrls)
+            ? ds.dicaImageUrls.filter(
+                (x): x is string => typeof x === "string" && x.trim().length > 0
+              )
+            : []
+        )
+        setFormData({
+          titulo: d.title,
+          disciplina: d.settings.disciplina ?? "",
+          nivel: d.settings.nivel ?? "",
+          conteudo: "",
+        })
+        setTags(d.settings.tags ?? [])
+        setVisibility(d.visibility)
+        setSelectedClassroomIds(d.classroomIds)
+        setLoadedArticleStatus(d.status)
+        setCoverUrl(null)
+        setCoverVideoUrl(null)
+      } else if (res.kind === "exercise") {
+        const e = res.exercise
+        setTipoSelecionado("exercicios")
+        setExerciseDraftId(e.id)
+        setExerciseIntroHtml(e.body_html ?? "")
+        setFormData({
+          titulo: e.title,
+          disciplina: e.settings.disciplina ?? "",
+          nivel: e.settings.nivel ?? "",
+          conteudo: "",
+        })
+        setTags(e.settings.tags ?? [])
+        setVisibility(e.visibility)
+        setSelectedClassroomIds(e.classroomIds)
+        setLoadedArticleStatus(e.status)
+        setCoverUrl(e.settings.coverUrl ?? null)
+        setCoverVideoUrl(null)
+        setExamDef(parseExamFromSettings(e.settings as Record<string, unknown>))
+      } else if (res.kind === "simulado") {
+        const e = res.simulado
+        setTipoSelecionado("simulado")
+        setSimuladoDraftId(e.id)
+        setSimuladoIntroHtml(e.body_html ?? "")
+        setStartsAtLocal(isoToDatetimeLocal(e.startsAt))
+        setDueAtLocal(isoToDatetimeLocal(e.dueAt))
+        setAssessmentClosed(e.assessmentClosed)
+        setFormData({
+          titulo: e.title,
+          disciplina: e.settings.disciplina ?? "",
+          nivel: e.settings.nivel ?? "",
+          conteudo: "",
+        })
+        setTags(e.settings.tags ?? [])
+        setVisibility(e.visibility)
+        setSelectedClassroomIds(e.classroomIds)
+        setLoadedArticleStatus(e.status)
+        setCoverUrl(e.settings.coverUrl ?? null)
+        setCoverVideoUrl(null)
+        setExamDef(parseExamFromSettings(e.settings as Record<string, unknown>))
+      } else {
+        const e = res.assessment
+        setTipoSelecionado("avaliacao")
+        setAssessmentDraftId(e.id)
+        setAssessmentIntroHtml(e.body_html ?? "")
+        setStartsAtLocal(isoToDatetimeLocal(e.startsAt))
+        setDueAtLocal(isoToDatetimeLocal(e.dueAt))
+        setAssessmentClosed(e.assessmentClosed)
+        setFormData({
+          titulo: e.title,
+          disciplina: e.settings.disciplina ?? "",
+          nivel: e.settings.nivel ?? "",
+          conteudo: "",
+        })
+        setTags(e.settings.tags ?? [])
+        setVisibility(e.visibility)
+        setSelectedClassroomIds(e.classroomIds)
+        setLoadedArticleStatus(e.status)
+        setCoverUrl(e.settings.coverUrl ?? null)
+        setCoverVideoUrl(null)
+        setExamDef(parseExamFromSettings(e.settings as Record<string, unknown>))
+      }
       setLoadingEdit(false)
     })
     return () => {
@@ -197,11 +446,48 @@ export function CriarConteudoClient({
       setCoverVideoUrl(null)
       resetArticleDraftCreation()
     }
+    if (tipo !== "exercicios") {
+      setExerciseDraftId(null)
+      setExamDef(null)
+      setExerciseIntroHtml("")
+      resetExerciseDraftCreation()
+    }
+    if (tipo !== "avaliacao") {
+      setAssessmentDraftId(null)
+      setAssessmentIntroHtml("")
+      setStartsAtLocal("")
+      setDueAtLocal("")
+      setAssessmentClosed(false)
+      resetAssessmentDraftCreation()
+    }
+    if (tipo !== "simulado") {
+      setSimuladoDraftId(null)
+      setSimuladoIntroHtml("")
+      setStartsAtLocal("")
+      setDueAtLocal("")
+      setAssessmentClosed(false)
+      resetSimuladoDraftCreation()
+    }
+    if (tipo !== "dica") {
+      setDicaDraftId(null)
+      setDicaBodyText("")
+      setDicaVideoUrl(null)
+      setDicaImageUrls([])
+      resetDicaDraftCreation()
+    }
   }
 
   useEffect(() => {
     if (initialEditId) return
-    if (step !== "editor" || tipoSelecionado !== "artigo") return
+    if (step !== "editor") return
+    if (
+      tipoSelecionado !== "artigo" &&
+      tipoSelecionado !== "dica" &&
+      tipoSelecionado !== "exercicios" &&
+      tipoSelecionado !== "avaliacao" &&
+      tipoSelecionado !== "simulado"
+    )
+      return
     void listMyClassroomsForArticle().then(setClassrooms)
   }, [step, tipoSelecionado, initialEditId])
 
@@ -311,13 +597,583 @@ export function CriarConteudoClient({
       return
     }
     resetArticleDraftCreation()
+    toast.success("Artigo enviado para revisao da IA")
+    router.push("/dashboard/professor/conteudos")
+  }
+
+  const handleSaveExerciseDraft = async () => {
+    const title = formData.titulo.trim()
+    if (!title) {
+      toast.error("Informe o titulo")
+      return
+    }
+    let cid = exerciseDraftId
+    if (!cid) {
+      if (initialEditId) {
+        toast.error("Aguarde o editor carregar")
+        return
+      }
+      try {
+        cid = await getOrCreateExerciseDraftId()
+        setExerciseDraftId(cid)
+      } catch (err) {
+        toast.error(
+          err instanceof Error ? err.message : "Erro ao criar rascunho"
+        )
+        return
+      }
+    }
+    const res = await saveExerciseDraft({
+      id: cid,
+      title,
+      bodyHtml: exerciseIntroHtml,
+      settings: {
+        tags,
+        disciplina: formData.disciplina.trim() || undefined,
+        nivel: formData.nivel.trim() || undefined,
+        coverUrl: coverUrl ?? null,
+        coverVideoUrl: null,
+      },
+      exam: examDef,
+    })
+    if (!res.ok) {
+      toast.error(res.error)
+      return
+    }
+    toast.success("Rascunho salvo")
+  }
+
+  const handlePublishExercise = async () => {
+    const title = formData.titulo.trim()
+    if (!title) {
+      toast.error("Informe o titulo")
+      return
+    }
+    if (visibility === "classrooms" && selectedClassroomIds.length === 0) {
+      toast.error("Selecione ao menos uma turma")
+      return
+    }
+    if (!examDef || examDef.questions.length === 0) {
+      toast.error("Adicione ao menos uma questao")
+      return
+    }
+    if (!coverUrl?.trim()) {
+      toast.message("Dica: adicione uma imagem de capa para destacar o exercicio no feed")
+    }
+    let cid = exerciseDraftId
+    if (!cid) {
+      if (initialEditId) {
+        toast.error("Aguarde o editor carregar")
+        return
+      }
+      try {
+        cid = await getOrCreateExerciseDraftId()
+        setExerciseDraftId(cid)
+      } catch (err) {
+        toast.error(
+          err instanceof Error ? err.message : "Erro ao criar rascunho para publicar"
+        )
+        return
+      }
+    }
+    setPublishing(true)
+    const saveRes = await saveExerciseDraft({
+      id: cid,
+      title,
+      bodyHtml: exerciseIntroHtml,
+      settings: {
+        tags,
+        disciplina: formData.disciplina.trim() || undefined,
+        nivel: formData.nivel.trim() || undefined,
+        coverUrl: coverUrl ?? null,
+        coverVideoUrl: null,
+      },
+      exam: examDef,
+    })
+    if (!saveRes.ok) {
+      setPublishing(false)
+      toast.error(saveRes.error)
+      return
+    }
+    const res = await publishExercise({
+      id: cid,
+      title,
+      bodyHtml: exerciseIntroHtml,
+      visibility,
+      classroomIds: visibility === "classrooms" ? selectedClassroomIds : undefined,
+      settings: {
+        tags,
+        disciplina: formData.disciplina.trim() || undefined,
+        nivel: formData.nivel.trim() || undefined,
+        coverUrl: coverUrl ?? null,
+        coverVideoUrl: null,
+        exam: examDef,
+      },
+    })
+    setPublishing(false)
+    if (!res.ok) {
+      toast.error(res.error)
+      return
+    }
+    resetExerciseDraftCreation()
     if (loadedArticleStatus === "published") {
       toast.success("Alteracoes salvas")
       router.push("/dashboard/professor/conteudos")
     } else {
-      toast.success("Artigo publicado")
+      toast.success("Exercicio publicado")
+      router.push(`/conteudo/${cid}`)
+    }
+  }
+
+  const handleSaveAssessmentDraft = async () => {
+    const title = formData.titulo.trim()
+    if (!title) {
+      toast.error("Informe o titulo")
+      return
+    }
+    let cid = assessmentDraftId
+    if (!cid) {
+      if (initialEditId) {
+        toast.error("Aguarde o editor carregar")
+        return
+      }
+      try {
+        cid = await getOrCreateAssessmentDraftId()
+        setAssessmentDraftId(cid)
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Erro ao criar rascunho")
+        return
+      }
+    }
+    const dueIso = datetimeLocalToIso(dueAtLocal)
+    const startsIso = datetimeLocalToIso(startsAtLocal)
+    const res = await saveAssessmentDraft({
+      id: cid,
+      title,
+      bodyHtml: assessmentIntroHtml,
+      settings: {
+        tags,
+        disciplina: formData.disciplina.trim() || undefined,
+        nivel: formData.nivel.trim() || undefined,
+        coverUrl: coverUrl ?? null,
+        coverVideoUrl: null,
+      },
+      exam: examDef,
+      dueAt: dueIso,
+      startsAt: startsIso,
+    })
+    if (!res.ok) {
+      toast.error(res.error)
+      return
+    }
+    toast.success("Rascunho salvo")
+  }
+
+  const handlePublishAssessment = async () => {
+    const title = formData.titulo.trim()
+    if (!title) {
+      toast.error("Informe o titulo")
+      return
+    }
+    if (visibility === "classrooms" && selectedClassroomIds.length === 0) {
+      toast.error("Selecione ao menos uma turma")
+      return
+    }
+    if (!examDef || examDef.questions.length === 0) {
+      toast.error("Adicione ao menos uma questao")
+      return
+    }
+    const dueIso = datetimeLocalToIso(dueAtLocal)
+    if (!dueIso) {
+      toast.error("Informe a data e hora limite de entrega")
+      return
+    }
+    if (!coverUrl?.trim()) {
+      toast.message("Dica: adicione uma imagem de capa para destacar no feed")
+    }
+    let cid = assessmentDraftId
+    if (!cid) {
+      if (initialEditId) {
+        toast.error("Aguarde o editor carregar")
+        return
+      }
+      try {
+        cid = await getOrCreateAssessmentDraftId()
+        setAssessmentDraftId(cid)
+      } catch (err) {
+        toast.error(
+          err instanceof Error ? err.message : "Erro ao criar rascunho para publicar"
+        )
+        return
+      }
+    }
+    setPublishing(true)
+    const startsIso = datetimeLocalToIso(startsAtLocal)
+    const saveRes = await saveAssessmentDraft({
+      id: cid,
+      title,
+      bodyHtml: assessmentIntroHtml,
+      settings: {
+        tags,
+        disciplina: formData.disciplina.trim() || undefined,
+        nivel: formData.nivel.trim() || undefined,
+        coverUrl: coverUrl ?? null,
+        coverVideoUrl: null,
+      },
+      exam: examDef,
+      dueAt: dueIso,
+      startsAt: startsIso,
+    })
+    if (!saveRes.ok) {
+      setPublishing(false)
+      toast.error(saveRes.error)
+      return
+    }
+    const res = await publishAssessment({
+      id: cid,
+      title,
+      bodyHtml: assessmentIntroHtml,
+      visibility,
+      classroomIds: visibility === "classrooms" ? selectedClassroomIds : undefined,
+      settings: {
+        tags,
+        disciplina: formData.disciplina.trim() || undefined,
+        nivel: formData.nivel.trim() || undefined,
+        coverUrl: coverUrl ?? null,
+        coverVideoUrl: null,
+        exam: examDef,
+      },
+      dueAt: dueIso,
+      startsAt: startsIso,
+    })
+    setPublishing(false)
+    if (!res.ok) {
+      toast.error(res.error)
+      return
+    }
+    resetAssessmentDraftCreation()
+    if (loadedArticleStatus === "published") {
+      toast.success("Alteracoes salvas")
+      router.push("/dashboard/professor/conteudos")
+    } else {
+      toast.success("Avaliacao publicada")
+      router.push(`/conteudo/${cid}`)
+    }
+  }
+
+  const handleSaveSimuladoDraft = async () => {
+    const title = formData.titulo.trim()
+    if (!title) {
+      toast.error("Informe o titulo")
+      return
+    }
+    let cid = simuladoDraftId
+    if (!cid) {
+      if (initialEditId) {
+        toast.error("Aguarde o editor carregar")
+        return
+      }
+      try {
+        cid = await getOrCreateSimuladoDraftId()
+        setSimuladoDraftId(cid)
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Erro ao criar rascunho")
+        return
+      }
+    }
+    const dueIso = datetimeLocalToIso(dueAtLocal)
+    const startsIso = datetimeLocalToIso(startsAtLocal)
+    const res = await saveSimuladoDraft({
+      id: cid,
+      title,
+      bodyHtml: simuladoIntroHtml,
+      settings: {
+        tags,
+        disciplina: formData.disciplina.trim() || undefined,
+        nivel: formData.nivel.trim() || undefined,
+        coverUrl: coverUrl ?? null,
+        coverVideoUrl: null,
+      },
+      exam: examDef,
+      dueAt: dueIso,
+      startsAt: startsIso,
+    })
+    if (!res.ok) {
+      toast.error(res.error)
+      return
+    }
+    toast.success("Rascunho salvo")
+  }
+
+  const handlePublishSimulado = async () => {
+    const title = formData.titulo.trim()
+    if (!title) {
+      toast.error("Informe o titulo")
+      return
+    }
+    if (visibility === "classrooms" && selectedClassroomIds.length === 0) {
+      toast.error("Selecione ao menos uma turma")
+      return
+    }
+    if (!examDef || examDef.questions.length === 0) {
+      toast.error("Adicione ao menos uma questao")
+      return
+    }
+    const dueIso = datetimeLocalToIso(dueAtLocal)
+    if (!dueIso) {
+      toast.error("Informe a data e hora limite de entrega")
+      return
+    }
+    if (!coverUrl?.trim()) {
+      toast.message("Dica: adicione uma imagem de capa para destacar no feed")
+    }
+    let cid = simuladoDraftId
+    if (!cid) {
+      if (initialEditId) {
+        toast.error("Aguarde o editor carregar")
+        return
+      }
+      try {
+        cid = await getOrCreateSimuladoDraftId()
+        setSimuladoDraftId(cid)
+      } catch (err) {
+        toast.error(
+          err instanceof Error ? err.message : "Erro ao criar rascunho para publicar"
+        )
+        return
+      }
+    }
+    setPublishing(true)
+    const startsIso = datetimeLocalToIso(startsAtLocal)
+    const saveRes = await saveSimuladoDraft({
+      id: cid,
+      title,
+      bodyHtml: simuladoIntroHtml,
+      settings: {
+        tags,
+        disciplina: formData.disciplina.trim() || undefined,
+        nivel: formData.nivel.trim() || undefined,
+        coverUrl: coverUrl ?? null,
+        coverVideoUrl: null,
+      },
+      exam: examDef,
+      dueAt: dueIso,
+      startsAt: startsIso,
+    })
+    if (!saveRes.ok) {
+      setPublishing(false)
+      toast.error(saveRes.error)
+      return
+    }
+    const res = await publishSimulado({
+      id: cid,
+      title,
+      bodyHtml: simuladoIntroHtml,
+      visibility,
+      classroomIds: visibility === "classrooms" ? selectedClassroomIds : undefined,
+      settings: {
+        tags,
+        disciplina: formData.disciplina.trim() || undefined,
+        nivel: formData.nivel.trim() || undefined,
+        coverUrl: coverUrl ?? null,
+        coverVideoUrl: null,
+        exam: examDef,
+      },
+      dueAt: dueIso,
+      startsAt: startsIso,
+    })
+    setPublishing(false)
+    if (!res.ok) {
+      toast.error(res.error)
+      return
+    }
+    resetSimuladoDraftCreation()
+    if (loadedArticleStatus === "published") {
+      toast.success("Alteracoes salvas")
+      router.push("/dashboard/professor/conteudos")
+    } else {
+      toast.success("Simulado publicado")
+      router.push(`/conteudo/${cid}`)
+    }
+  }
+
+  const handleSaveDicaDraft = async () => {
+    const title = formData.titulo.trim()
+    if (!title) {
+      toast.error("Informe o titulo")
+      return
+    }
+    let cid = dicaDraftId ?? initialEditId
+    if (!cid) {
+      try {
+        cid = await getOrCreateDicaDraftId()
+        setDicaDraftId(cid)
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Erro ao criar rascunho")
+        return
+      }
+    }
+    const res = await saveDicaDraft({
+      id: cid,
+      title,
+      bodyHtml: dicaBodyText,
+      settings: {
+        tags,
+        disciplina: formData.disciplina.trim() || undefined,
+        nivel: formData.nivel.trim() || undefined,
+        dicaVideoUrl: dicaVideoUrl ?? null,
+        dicaImageUrls: dicaImageUrls.length > 0 ? dicaImageUrls : null,
+      },
+    })
+    if (!res.ok) {
+      toast.error(res.error)
+      return
+    }
+    toast.success("Rascunho salvo")
+  }
+
+  const handlePublishDica = async () => {
+    const title = formData.titulo.trim()
+    if (!title) {
+      toast.error("Informe o titulo")
+      return
+    }
+    if (visibility === "classrooms" && selectedClassroomIds.length === 0) {
+      toast.error("Selecione ao menos uma turma")
+      return
+    }
+    let contentId = dicaDraftId ?? initialEditId
+    if (!contentId) {
+      try {
+        contentId = await getOrCreateDicaDraftId()
+        setDicaDraftId(contentId)
+      } catch (err) {
+        toast.error(
+          err instanceof Error ? err.message : "Erro ao criar rascunho para publicar"
+        )
+        return
+      }
+    }
+    setPublishing(true)
+    const res = await publishDica({
+      id: contentId,
+      title,
+      bodyHtml: dicaBodyText,
+      visibility,
+      classroomIds: visibility === "classrooms" ? selectedClassroomIds : undefined,
+      settings: {
+        tags,
+        disciplina: formData.disciplina.trim() || undefined,
+        nivel: formData.nivel.trim() || undefined,
+        dicaVideoUrl: dicaVideoUrl ?? null,
+        dicaImageUrls: dicaImageUrls.length > 0 ? dicaImageUrls : null,
+      },
+    })
+    setPublishing(false)
+    if (!res.ok) {
+      toast.error(res.error)
+      return
+    }
+    resetDicaDraftCreation()
+    if (loadedArticleStatus === "published") {
+      toast.success("Alteracoes salvas")
+      router.push("/dashboard/professor/conteudos")
+    } else {
+      toast.success("Dica publicada")
       router.push(`/conteudo/${contentId}`)
     }
+  }
+
+  const handleDicaVideoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) {
+      e.target.value = ""
+      return
+    }
+    setCoverUploading(true)
+    try {
+      let cid = dicaDraftId ?? initialEditId
+      if (!cid) {
+        cid = await getOrCreateDicaDraftId()
+        setDicaDraftId(cid)
+      }
+      const res = await uploadArticleBlobViaApi("cover-video", cid, file)
+      if (!res.ok) {
+        toast.error(res.error)
+        return
+      }
+      setDicaVideoUrl(res.displayUrl)
+      setDicaImageUrls([])
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Erro no upload do video")
+    } finally {
+      setCoverUploading(false)
+      e.target.value = ""
+    }
+  }
+
+  const handleDicaImagesChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (!files?.length) {
+      e.target.value = ""
+      return
+    }
+    const file = files[0]
+    if (!file) {
+      e.target.value = ""
+      return
+    }
+    setCoverUploading(true)
+    try {
+      let cid = dicaDraftId ?? initialEditId
+      if (!cid) {
+        cid = await getOrCreateDicaDraftId()
+        setDicaDraftId(cid)
+      }
+      const res = await uploadArticleBlobViaApi("dica-image", cid, file)
+      if (!res.ok) {
+        toast.error(res.error)
+        return
+      }
+      setDicaImageUrls([res.displayUrl])
+      setDicaVideoUrl(null)
+      toast.success("Imagem enviada com sucesso")
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Erro no upload")
+    } finally {
+      setCoverUploading(false)
+      e.target.value = ""
+    }
+  }
+
+  const handleCloseAssessment = async () => {
+    const cid = assessmentDraftId ?? initialEditId
+    if (!cid) return
+    setClosingAssessment(true)
+    const res = await closeContentAssessment(cid)
+    setClosingAssessment(false)
+    if (!res.ok) {
+      toast.error(res.error)
+      return
+    }
+    setAssessmentClosed(true)
+    toast.success("Avaliacao encerrada para novas respostas")
+    router.refresh()
+  }
+
+  const handleCloseSimulado = async () => {
+    const cid = simuladoDraftId ?? initialEditId
+    if (!cid) return
+    setClosingAssessment(true)
+    const res = await closeContentAssessment(cid)
+    setClosingAssessment(false)
+    if (!res.ok) {
+      toast.error(res.error)
+      return
+    }
+    setAssessmentClosed(true)
+    toast.success("Simulado encerrado para novas respostas")
+    router.refresh()
   }
 
   const goBackFromEditor = () => {
@@ -329,9 +1185,27 @@ export function CriarConteudoClient({
     setTipoSelecionado(null)
     setArticleDraftId(null)
     setArticleBodyHtml("")
+    setExerciseDraftId(null)
+    setExamDef(null)
+    setExerciseIntroHtml("")
+    setAssessmentDraftId(null)
+    setAssessmentIntroHtml("")
+    setSimuladoDraftId(null)
+    setSimuladoIntroHtml("")
+    setStartsAtLocal("")
+    setDueAtLocal("")
+    setAssessmentClosed(false)
     setCoverUrl(null)
     setCoverVideoUrl(null)
     resetArticleDraftCreation()
+    resetExerciseDraftCreation()
+    resetAssessmentDraftCreation()
+    resetSimuladoDraftCreation()
+    setDicaDraftId(null)
+    setDicaBodyText("")
+    setDicaVideoUrl(null)
+    setDicaImageUrls([])
+    resetDicaDraftCreation()
   }
 
   const clearCoverMedia = () => {
@@ -341,18 +1215,40 @@ export function CriarConteudoClient({
 
   const handleCoverImageChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    e.target.value = ""
-    if (!file) return
+    if (!file) {
+      e.target.value = ""
+      return
+    }
     setCoverUploading(true)
     try {
-      let cid = articleDraftId
+      const isExercise = tipoSelecionado === "exercicios"
+      const isAssessment = tipoSelecionado === "avaliacao"
+      const isSimulado = tipoSelecionado === "simulado"
+      let cid = isExercise
+        ? exerciseDraftId
+        : isAssessment
+          ? assessmentDraftId
+          : isSimulado
+            ? simuladoDraftId
+            : articleDraftId
       if (!cid) {
         if (initialEditId) {
-          toast.error("Aguarde o artigo carregar")
+          toast.error("Aguarde o editor carregar")
           return
         }
-        cid = await getOrCreateArticleDraftId()
-        setArticleDraftId(cid)
+        if (isExercise) {
+          cid = await getOrCreateExerciseDraftId()
+          setExerciseDraftId(cid)
+        } else if (isAssessment) {
+          cid = await getOrCreateAssessmentDraftId()
+          setAssessmentDraftId(cid)
+        } else if (isSimulado) {
+          cid = await getOrCreateSimuladoDraftId()
+          setSimuladoDraftId(cid)
+        } else {
+          cid = await getOrCreateArticleDraftId()
+          setArticleDraftId(cid)
+        }
       }
       const res = await uploadArticleBlobViaApi("cover-image", cid, file)
       if (!res.ok) {
@@ -365,13 +1261,16 @@ export function CriarConteudoClient({
       toast.error(err instanceof Error ? err.message : "Erro no upload da capa")
     } finally {
       setCoverUploading(false)
+      e.target.value = ""
     }
   }
 
   const handleCoverVideoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    e.target.value = ""
-    if (!file) return
+    if (!file) {
+      e.target.value = ""
+      return
+    }
     setCoverUploading(true)
     try {
       let cid = articleDraftId
@@ -394,6 +1293,7 @@ export function CriarConteudoClient({
       toast.error(err instanceof Error ? err.message : "Erro no upload do video")
     } finally {
       setCoverUploading(false)
+      e.target.value = ""
     }
   }
 
@@ -401,7 +1301,7 @@ export function CriarConteudoClient({
     return (
       <div className="max-w-4xl mx-auto flex flex-col items-center justify-center min-h-[45vh] gap-3 pb-20">
         <Loader2 className="h-10 w-10 animate-spin text-[#1D4ED8]" />
-        <p className="text-sm text-gray-600">Carregando artigo...</p>
+        <p className="text-sm text-gray-600">Carregando conteudo...</p>
       </div>
     )
   }
@@ -424,7 +1324,15 @@ export function CriarConteudoClient({
                 ? "Criar Conteudo"
                 : initialEditId && tipoSelecionado === "artigo"
                   ? "Editar artigo"
-                  : `Novo ${tiposConteudo.find((t) => t.id === tipoSelecionado)?.label}`}
+                  : initialEditId && tipoSelecionado === "exercicios"
+                    ? "Editar exercicio"
+                    : initialEditId && tipoSelecionado === "avaliacao"
+                      ? "Editar avaliacao"
+                      : initialEditId && tipoSelecionado === "simulado"
+                        ? "Editar simulado"
+                        : initialEditId && tipoSelecionado === "dica"
+                          ? "Editar dica"
+                          : `Novo ${tiposConteudo.find((t) => t.id === tipoSelecionado)?.label}`}
             </h1>
             <p className="text-gray-600">
               {step === "tipo"
@@ -470,6 +1378,61 @@ export function CriarConteudoClient({
       {step === "editor" && (
         <div className="bg-white rounded-xl border border-gray-100 p-6">
           <form className="space-y-6" onSubmit={(e) => e.preventDefault()}>
+            {/* Banners de status de revisão — artigos only */}
+            {tipoSelecionado === "artigo" && loadedArticleStatus === "verificando" && (
+              <div className="flex items-start gap-3 bg-blue-50 border border-blue-200 rounded-lg p-4">
+                <Loader2 className="h-5 w-5 animate-spin text-blue-600 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-sm font-semibold text-blue-800">Artigo em análise pela IA</p>
+                  <p className="text-xs text-blue-600 mt-0.5">
+                    O agente está verificando fatos, originalidade e qualidade. Você será notificado assim que concluir.
+                  </p>
+                </div>
+              </div>
+            )}
+            {tipoSelecionado === "artigo" && loadedArticleStatus === "revisao" && (
+              <div className="flex items-start justify-between gap-3 bg-red-50 border border-red-200 rounded-lg p-4">
+                <div className="flex items-start gap-3">
+                  <XCircle className="h-5 w-5 text-red-600 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-sm font-semibold text-red-800">Revisão necessária</p>
+                    <p className="text-xs text-red-600 mt-0.5">
+                      Score abaixo de 50. Corrija os problemas apontados e reenvie para revisão.
+                    </p>
+                  </div>
+                </div>
+                {reviewResult && (
+                  <button
+                    type="button"
+                    className="text-xs font-semibold text-red-700 underline underline-offset-2 shrink-0"
+                    onClick={() => setShowEditorReviewDialog(true)}
+                  >
+                    Ver resultado
+                  </button>
+                )}
+              </div>
+            )}
+            {tipoSelecionado === "artigo" && loadedArticleStatus === "aguardando_decisao" && (
+              <div className="flex items-start justify-between gap-3 bg-amber-50 border border-amber-200 rounded-lg p-4">
+                <div className="flex items-start gap-3">
+                  <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-sm font-semibold text-amber-800">Aguarda sua decisão</p>
+                    <p className="text-xs text-amber-700 mt-0.5">
+                      Score entre 50 e 80. Você pode publicar assim mesmo ou revisar o artigo.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="text-xs font-semibold text-amber-700 underline underline-offset-2 shrink-0"
+                  onClick={() => setShowEditorReviewDialog(true)}
+                >
+                  Decidir
+                </button>
+              </div>
+            )}
+
             <div className="space-y-2">
               <Label htmlFor="titulo">Titulo</Label>
               <Input
@@ -569,7 +1532,16 @@ export function CriarConteudoClient({
                     </div>
                   ) : null}
                   <div className="flex items-center gap-2 flex-wrap">
-                    <label className="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background h-10 px-4 cursor-pointer hover:bg-muted/50 disabled:opacity-50">
+                    <label
+                      className={cn(
+                        "inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background h-10 px-4 cursor-pointer hover:bg-muted/50",
+                        (coverUploading || (!!initialEditId && !articleDraftId)) &&
+                          "pointer-events-none cursor-not-allowed opacity-50"
+                      )}
+                      aria-disabled={
+                        coverUploading || (!!initialEditId && !articleDraftId) || undefined
+                      }
+                    >
                       <ImageIcon className="h-4 w-4 mr-2" />
                       {coverUploading ? "Enviando..." : "Imagem"}
                       <input
@@ -580,7 +1552,16 @@ export function CriarConteudoClient({
                         onChange={(e) => void handleCoverImageChange(e)}
                       />
                     </label>
-                    <label className="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background h-10 px-4 cursor-pointer hover:bg-muted/50 disabled:opacity-50">
+                    <label
+                      className={cn(
+                        "inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background h-10 px-4 cursor-pointer hover:bg-muted/50",
+                        (coverUploading || (!!initialEditId && !articleDraftId)) &&
+                          "pointer-events-none cursor-not-allowed opacity-50"
+                      )}
+                      aria-disabled={
+                        coverUploading || (!!initialEditId && !articleDraftId) || undefined
+                      }
+                    >
                       <Video className="h-4 w-4 mr-2" />
                       {coverUploading ? "Enviando..." : "Video"}
                       <input
@@ -687,7 +1668,775 @@ export function CriarConteudoClient({
               </>
             )}
 
-            {tipoSelecionado !== "artigo" && tipoSelecionado !== undefined && (
+            {tipoSelecionado === "dica" && (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="dica-desc">Descricao</Label>
+                  <Textarea
+                    id="dica-desc"
+                    placeholder="Legenda da sua dica (paragrafos e quebras de linha)"
+                    className="min-h-[120px]"
+                    value={dicaBodyText}
+                    onChange={(e) => setDicaBodyText(e.target.value)}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Midia (video ou 1 imagem)</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Escolha um video ou uma imagem (nao os dois). Imagem: JPEG, PNG, GIF ou WebP ate 5
+                    MB. Video: MP4, WebM ou MOV ate 80 MB.
+                  </p>
+                  <div className="grid sm:grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <Label htmlFor="dica-video-upload" className="text-xs text-muted-foreground">
+                        Video
+                      </Label>
+                      <Input
+                        id="dica-video-upload"
+                        type="file"
+                        accept="video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov,.m4v"
+                        disabled={coverUploading}
+                        onChange={(e) => void handleDicaVideoChange(e)}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label htmlFor="dica-image-upload" className="text-xs text-muted-foreground">
+                        Imagem
+                      </Label>
+                      <Input
+                        id="dica-image-upload"
+                        type="file"
+                        accept="image/jpeg,image/png,image/gif,image/webp,.jpg,.jpeg,.png,.gif,.webp"
+                        disabled={coverUploading}
+                        onChange={(e) => void handleDicaImagesChange(e)}
+                      />
+                    </div>
+                    {coverUploading ? (
+                      <p className="text-xs text-muted-foreground sm:col-span-2">Enviando arquivo...</p>
+                    ) : null}
+                    <span className="text-xs text-muted-foreground">
+                      {dicaImageUrls.length}/{DICA_MAX_IMAGES} imagem
+                    </span>
+                  </div>
+                  {dicaVideoUrl ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setDicaVideoUrl(null)}
+                    >
+                      Remover video
+                    </Button>
+                  ) : null}
+                  {dicaImageUrls.length > 0 ? (
+                    <ul className="flex flex-wrap gap-2">
+                      {dicaImageUrls.map((url, idx) => (
+                        <li
+                          key={`${url}-${idx}`}
+                          className="relative h-16 w-16 rounded border overflow-hidden shrink-0"
+                        >
+                          <img src={url} alt="" className="h-full w-full object-cover" />
+                          <button
+                            type="button"
+                            className="absolute top-0.5 right-0.5 rounded-full bg-black/60 p-0.5 text-white"
+                            onClick={() =>
+                              setDicaImageUrls((prev) => prev.filter((_, i) => i !== idx))
+                            }
+                            aria-label="Remover imagem"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {dicaImageUrls.length > 0 ? (
+                    <div className="rounded-md border border-gray-200 bg-gray-50 p-2 space-y-1">
+                      <p className="text-xs font-medium text-gray-700">
+                        Imagem enviada
+                      </p>
+                      {dicaImageUrls.map((url, idx) => (
+                        <div
+                          key={`${url}-item-${idx}`}
+                          className="text-xs text-gray-600 flex items-center justify-between gap-2"
+                        >
+                          <span className="truncate">Imagem {idx + 1} enviada</span>
+                          <a
+                            href={url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-[#1D4ED8] hover:underline shrink-0"
+                          >
+                            abrir
+                          </a>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="space-y-3 rounded-lg border border-gray-100 p-4 bg-gray-50/80">
+                  <Label className="text-base">Quem pode ver esta dica</Label>
+                  <div className="space-y-2">
+                    <label className="flex items-start gap-3 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="vis-dica"
+                        className="mt-1"
+                        checked={visibility === "public"}
+                        onChange={() => setVisibility("public")}
+                      />
+                      <span>
+                        <span className="font-medium text-gray-900">Publico</span>
+                        <span className="block text-sm text-gray-600">
+                          Qualquer pessoa com o link ou no feed explorar
+                        </span>
+                      </span>
+                    </label>
+                    <label className="flex items-start gap-3 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="vis-dica"
+                        className="mt-1"
+                        checked={visibility === "classrooms"}
+                        onChange={() => setVisibility("classrooms")}
+                      />
+                      <span>
+                        <span className="font-medium text-gray-900">Turmas selecionadas</span>
+                        <span className="block text-sm text-gray-600">
+                          Apenas alunos matriculados nas turmas que voce marcar
+                        </span>
+                      </span>
+                    </label>
+                    <label className="flex items-start gap-3 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="vis-dica"
+                        className="mt-1"
+                        checked={visibility === "private"}
+                        onChange={() => setVisibility("private")}
+                      />
+                      <span>
+                        <span className="font-medium text-gray-900">Privado</span>
+                        <span className="block text-sm text-gray-600">
+                          Somente voce (rascunho visivel na sua conta)
+                        </span>
+                      </span>
+                    </label>
+                  </div>
+
+                  {visibility === "classrooms" && (
+                    <div className="pt-2 space-y-2 border-t border-gray-200 mt-2">
+                      <p className="text-sm text-gray-600">Selecione as turmas</p>
+                      {classrooms.length === 0 ? (
+                        <p className="text-sm text-amber-700">
+                          Voce ainda nao tem turmas ativas. Crie uma em Minhas Salas.
+                        </p>
+                      ) : (
+                        <ul className="space-y-2 max-h-40 overflow-y-auto">
+                          {classrooms.map((c) => (
+                            <li key={c.id}>
+                              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedClassroomIds.includes(c.id)}
+                                  onChange={() => toggleClassroom(c.id)}
+                                />
+                                <span>
+                                  {c.name}{" "}
+                                  <span className="text-gray-500">({c.subject})</span>
+                                </span>
+                              </label>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+
+            {tipoSelecionado === "avaliacao" && (
+              <>
+                <div className="space-y-2">
+                  <Label>Capa (imagem)</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Apenas imagem (JPEG, PNG, GIF ou WebP ate 5 MB). Video nao e permitido em
+                    avaliacoes.
+                  </p>
+                  {coverUrl ? (
+                    <div className="relative rounded-lg border border-input overflow-hidden aspect-video max-h-52 bg-muted">
+                      <ArticleCoverMedia
+                        imageUrl={coverUrl}
+                        videoUrl={null}
+                        className="w-full h-full object-cover"
+                      />
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        className="absolute top-2 right-2"
+                        onClick={() => {
+                          setCoverUrl(null)
+                          setCoverVideoUrl(null)
+                        }}
+                      >
+                        Remover
+                      </Button>
+                    </div>
+                  ) : null}
+                  <label
+                    className={cn(
+                      "inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background h-10 px-4 cursor-pointer hover:bg-muted/50",
+                      (coverUploading || (!!initialEditId && !assessmentDraftId)) &&
+                        "pointer-events-none cursor-not-allowed opacity-50"
+                    )}
+                    aria-disabled={
+                      coverUploading || (!!initialEditId && !assessmentDraftId) || undefined
+                    }
+                  >
+                    <ImageIcon className="h-4 w-4 mr-2" />
+                    {coverUploading ? "Enviando..." : "Enviar imagem de capa"}
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,image/gif,image/webp,.jpg,.jpeg,.png,.gif,.webp"
+                      className="sr-only"
+                      disabled={coverUploading || (!!initialEditId && !assessmentDraftId)}
+                      onChange={(e) => void handleCoverImageChange(e)}
+                    />
+                  </label>
+                </div>
+
+                <div className="grid sm:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="assessment-starts">Abertura (opcional)</Label>
+                    <Input
+                      id="assessment-starts"
+                      type="datetime-local"
+                      className="h-12"
+                      value={startsAtLocal}
+                      onChange={(e) => setStartsAtLocal(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Se vazio, os alunos podem responder apos a publicacao.
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="assessment-due">Entrega limite</Label>
+                    <Input
+                      id="assessment-due"
+                      type="datetime-local"
+                      className="h-12"
+                      value={dueAtLocal}
+                      onChange={(e) => setDueAtLocal(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Obrigatorio ao publicar. Bloqueia rascunho e envio apos esse horario.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Texto introdutorio (opcional)</Label>
+                  <TrixArticleBody
+                    key={initialEditId ? `as-edit-${initialEditId}` : "novo-avaliacao"}
+                    contentItemId={assessmentDraftId}
+                    initialHtml={assessmentIntroHtml}
+                    onHtmlChange={setAssessmentIntroHtml}
+                    ensureContentItemId={initialEditId ? undefined : ensureAssessmentDraftId}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <Label>Questoes</Label>
+                    {examDef ? (
+                      <span className="text-xs text-gray-500">
+                        Total: {totalExamPoints(examDef)} pts
+                      </span>
+                    ) : null}
+                  </div>
+                  <ActivityExamEditor value={examDef} onChange={setExamDef} />
+                </div>
+
+                <div className="space-y-3 rounded-lg border border-gray-100 p-4 bg-gray-50/80">
+                  <Label className="text-base">Quem pode ver esta avaliacao</Label>
+                  <div className="space-y-2">
+                    <label className="flex items-start gap-3 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="vis-as"
+                        className="mt-1"
+                        checked={visibility === "public"}
+                        onChange={() => setVisibility("public")}
+                      />
+                      <span>
+                        <span className="font-medium text-gray-900">Publico</span>
+                        <span className="block text-sm text-gray-600">
+                          Qualquer pessoa com o link ou no feed explorar
+                        </span>
+                      </span>
+                    </label>
+                    <label className="flex items-start gap-3 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="vis-as"
+                        className="mt-1"
+                        checked={visibility === "classrooms"}
+                        onChange={() => setVisibility("classrooms")}
+                      />
+                      <span>
+                        <span className="font-medium text-gray-900">Turmas selecionadas</span>
+                        <span className="block text-sm text-gray-600">
+                          Apenas alunos matriculados nas turmas que voce marcar
+                        </span>
+                      </span>
+                    </label>
+                    <label className="flex items-start gap-3 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="vis-as"
+                        className="mt-1"
+                        checked={visibility === "private"}
+                        onChange={() => setVisibility("private")}
+                      />
+                      <span>
+                        <span className="font-medium text-gray-900">Privado</span>
+                        <span className="block text-sm text-gray-600">
+                          Somente voce (rascunho visivel na sua conta)
+                        </span>
+                      </span>
+                    </label>
+                  </div>
+
+                  {visibility === "classrooms" && (
+                    <div className="pt-2 space-y-2 border-t border-gray-200 mt-2">
+                      <p className="text-sm text-gray-600">Selecione as turmas</p>
+                      {classrooms.length === 0 ? (
+                        <p className="text-sm text-amber-700">
+                          Voce ainda nao tem turmas ativas. Crie uma em Minhas Salas.
+                        </p>
+                      ) : (
+                        <ul className="space-y-2 max-h-40 overflow-y-auto">
+                          {classrooms.map((c) => (
+                            <li key={c.id}>
+                              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedClassroomIds.includes(c.id)}
+                                  onChange={() => toggleClassroom(c.id)}
+                                />
+                                <span>
+                                  {c.name}{" "}
+                                  <span className="text-gray-500">({c.subject})</span>
+                                </span>
+                              </label>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {loadedArticleStatus === "published" && !assessmentClosed ? (
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      disabled={closingAssessment}
+                      onClick={() => void handleCloseAssessment()}
+                    >
+                      {closingAssessment ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : null}
+                      Encerrar avaliacao
+                    </Button>
+                    <p className="text-xs text-muted-foreground self-center">
+                      Alunos deixam de enviar ou alterar rascunho; voce ainda pode corrigir
+                      dissertativas.
+                    </p>
+                  </div>
+                ) : null}
+              </>
+            )}
+
+            {tipoSelecionado === "simulado" && (
+              <>
+                <div className="space-y-2">
+                  <Label>Capa (imagem)</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Apenas imagem (JPEG, PNG, GIF ou WebP ate 5 MB). Video nao e permitido em
+                    simulados.
+                  </p>
+                  {coverUrl ? (
+                    <div className="relative rounded-lg border border-input overflow-hidden aspect-video max-h-52 bg-muted">
+                      <ArticleCoverMedia
+                        imageUrl={coverUrl}
+                        videoUrl={null}
+                        className="w-full h-full object-cover"
+                      />
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        className="absolute top-2 right-2"
+                        onClick={() => {
+                          setCoverUrl(null)
+                          setCoverVideoUrl(null)
+                        }}
+                      >
+                        Remover
+                      </Button>
+                    </div>
+                  ) : null}
+                  <label
+                    className={cn(
+                      "inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background h-10 px-4 cursor-pointer hover:bg-muted/50",
+                      (coverUploading || (!!initialEditId && !simuladoDraftId)) &&
+                        "pointer-events-none cursor-not-allowed opacity-50"
+                    )}
+                    aria-disabled={
+                      coverUploading || (!!initialEditId && !simuladoDraftId) || undefined
+                    }
+                  >
+                    <ImageIcon className="h-4 w-4 mr-2" />
+                    {coverUploading ? "Enviando..." : "Enviar imagem de capa"}
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,image/gif,image/webp,.jpg,.jpeg,.png,.gif,.webp"
+                      className="sr-only"
+                      disabled={coverUploading || (!!initialEditId && !simuladoDraftId)}
+                      onChange={(e) => void handleCoverImageChange(e)}
+                    />
+                  </label>
+                </div>
+
+                <div className="grid sm:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="simulado-starts">Abertura (opcional)</Label>
+                    <Input
+                      id="simulado-starts"
+                      type="datetime-local"
+                      className="h-12"
+                      value={startsAtLocal}
+                      onChange={(e) => setStartsAtLocal(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Se vazio, os alunos podem responder apos a publicacao.
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="simulado-due">Entrega limite</Label>
+                    <Input
+                      id="simulado-due"
+                      type="datetime-local"
+                      className="h-12"
+                      value={dueAtLocal}
+                      onChange={(e) => setDueAtLocal(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Obrigatorio ao publicar. Bloqueia rascunho e envio apos esse horario.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Texto introdutorio (opcional)</Label>
+                  <TrixArticleBody
+                    key={initialEditId ? `sim-edit-${initialEditId}` : "novo-simulado"}
+                    contentItemId={simuladoDraftId}
+                    initialHtml={simuladoIntroHtml}
+                    onHtmlChange={setSimuladoIntroHtml}
+                    ensureContentItemId={initialEditId ? undefined : ensureSimuladoDraftId}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <Label>Questoes (disciplina por questao)</Label>
+                    {examDef ? (
+                      <span className="text-xs text-gray-500">
+                        Total: {totalExamPoints(examDef)} pts
+                      </span>
+                    ) : null}
+                  </div>
+                  <ActivityExamEditor
+                    value={examDef}
+                    onChange={setExamDef}
+                    showDisciplinaPerQuestion
+                    disciplinaOptions={disciplinas}
+                  />
+                </div>
+
+                <div className="space-y-3 rounded-lg border border-gray-100 p-4 bg-gray-50/80">
+                  <Label className="text-base">Quem pode ver este simulado</Label>
+                  <div className="space-y-2">
+                    <label className="flex items-start gap-3 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="vis-sim"
+                        className="mt-1"
+                        checked={visibility === "public"}
+                        onChange={() => setVisibility("public")}
+                      />
+                      <span>
+                        <span className="font-medium text-gray-900">Publico</span>
+                        <span className="block text-sm text-gray-600">
+                          Qualquer pessoa com o link ou no feed explorar
+                        </span>
+                      </span>
+                    </label>
+                    <label className="flex items-start gap-3 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="vis-sim"
+                        className="mt-1"
+                        checked={visibility === "classrooms"}
+                        onChange={() => setVisibility("classrooms")}
+                      />
+                      <span>
+                        <span className="font-medium text-gray-900">Turmas selecionadas</span>
+                        <span className="block text-sm text-gray-600">
+                          Apenas alunos matriculados nas turmas que voce marcar
+                        </span>
+                      </span>
+                    </label>
+                    <label className="flex items-start gap-3 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="vis-sim"
+                        className="mt-1"
+                        checked={visibility === "private"}
+                        onChange={() => setVisibility("private")}
+                      />
+                      <span>
+                        <span className="font-medium text-gray-900">Privado</span>
+                        <span className="block text-sm text-gray-600">
+                          Somente voce (rascunho visivel na sua conta)
+                        </span>
+                      </span>
+                    </label>
+                  </div>
+
+                  {visibility === "classrooms" && (
+                    <div className="pt-2 space-y-2 border-t border-gray-200 mt-2">
+                      <p className="text-sm text-gray-600">Selecione as turmas</p>
+                      {classrooms.length === 0 ? (
+                        <p className="text-sm text-amber-700">
+                          Voce ainda nao tem turmas ativas. Crie uma em Minhas Salas.
+                        </p>
+                      ) : (
+                        <ul className="space-y-2 max-h-40 overflow-y-auto">
+                          {classrooms.map((c) => (
+                            <li key={c.id}>
+                              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedClassroomIds.includes(c.id)}
+                                  onChange={() => toggleClassroom(c.id)}
+                                />
+                                <span>
+                                  {c.name}{" "}
+                                  <span className="text-gray-500">({c.subject})</span>
+                                </span>
+                              </label>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {loadedArticleStatus === "published" && !assessmentClosed ? (
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      disabled={closingAssessment}
+                      onClick={() => void handleCloseSimulado()}
+                    >
+                      {closingAssessment ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : null}
+                      Encerrar simulado
+                    </Button>
+                    <p className="text-xs text-muted-foreground self-center">
+                      Alunos deixam de enviar ou alterar rascunho; voce ainda pode corrigir
+                      dissertativas.
+                    </p>
+                  </div>
+                ) : null}
+              </>
+            )}
+
+            {tipoSelecionado === "exercicios" && (
+              <>
+                    <div className="space-y-2">
+                      <Label>Capa do exercicio (imagem)</Label>
+                      <p className="text-xs text-muted-foreground">
+                        Apenas imagem (JPEG, PNG, GIF ou WebP ate 5 MB). Recomendado para o feed e pagina
+                        publica. Video nao e permitido em exercicios.
+                      </p>
+                      {coverUrl ? (
+                        <div className="relative rounded-lg border border-input overflow-hidden aspect-video max-h-52 bg-muted">
+                          <ArticleCoverMedia
+                            imageUrl={coverUrl}
+                            videoUrl={null}
+                            className="w-full h-full object-cover"
+                          />
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            className="absolute top-2 right-2"
+                            onClick={() => {
+                              setCoverUrl(null)
+                              setCoverVideoUrl(null)
+                            }}
+                          >
+                            Remover
+                          </Button>
+                        </div>
+                      ) : null}
+                      <label
+                        className={cn(
+                          "inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background h-10 px-4 cursor-pointer hover:bg-muted/50",
+                          (coverUploading || (!!initialEditId && !exerciseDraftId)) &&
+                            "pointer-events-none cursor-not-allowed opacity-50"
+                        )}
+                        aria-disabled={
+                          coverUploading || (!!initialEditId && !exerciseDraftId) || undefined
+                        }
+                      >
+                        <ImageIcon className="h-4 w-4 mr-2" />
+                        {coverUploading ? "Enviando..." : "Enviar imagem de capa"}
+                        <input
+                          type="file"
+                          accept="image/jpeg,image/png,image/gif,image/webp,.jpg,.jpeg,.png,.gif,.webp"
+                          className="sr-only"
+                          disabled={coverUploading || (!!initialEditId && !exerciseDraftId)}
+                          onChange={(e) => void handleCoverImageChange(e)}
+                        />
+                      </label>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label>Texto introdutorio (opcional)</Label>
+                      <TrixArticleBody
+                        key={initialEditId ? `ex-edit-${initialEditId}` : "novo-exercicio"}
+                        contentItemId={exerciseDraftId}
+                        initialHtml={exerciseIntroHtml}
+                        onHtmlChange={setExerciseIntroHtml}
+                        ensureContentItemId={initialEditId ? undefined : ensureExerciseDraftId}
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <Label>Questoes</Label>
+                        {examDef ? (
+                          <span className="text-xs text-gray-500">
+                            Total: {totalExamPoints(examDef)} pts
+                          </span>
+                        ) : null}
+                      </div>
+                      <ActivityExamEditor value={examDef} onChange={setExamDef} />
+                    </div>
+
+                    <div className="space-y-3 rounded-lg border border-gray-100 p-4 bg-gray-50/80">
+                      <Label className="text-base">Quem pode ver este exercicio</Label>
+                      <div className="space-y-2">
+                        <label className="flex items-start gap-3 cursor-pointer">
+                          <input
+                            type="radio"
+                            name="vis-ex"
+                            className="mt-1"
+                            checked={visibility === "public"}
+                            onChange={() => setVisibility("public")}
+                          />
+                          <span>
+                            <span className="font-medium text-gray-900">Publico</span>
+                            <span className="block text-sm text-gray-600">
+                              Qualquer pessoa com o link ou no feed explorar
+                            </span>
+                          </span>
+                        </label>
+                        <label className="flex items-start gap-3 cursor-pointer">
+                          <input
+                            type="radio"
+                            name="vis-ex"
+                            className="mt-1"
+                            checked={visibility === "classrooms"}
+                            onChange={() => setVisibility("classrooms")}
+                          />
+                          <span>
+                            <span className="font-medium text-gray-900">Turmas selecionadas</span>
+                            <span className="block text-sm text-gray-600">
+                              Apenas alunos matriculados nas turmas que voce marcar
+                            </span>
+                          </span>
+                        </label>
+                        <label className="flex items-start gap-3 cursor-pointer">
+                          <input
+                            type="radio"
+                            name="vis-ex"
+                            className="mt-1"
+                            checked={visibility === "private"}
+                            onChange={() => setVisibility("private")}
+                          />
+                          <span>
+                            <span className="font-medium text-gray-900">Privado</span>
+                            <span className="block text-sm text-gray-600">
+                              Somente voce (rascunho visivel na sua conta)
+                            </span>
+                          </span>
+                        </label>
+                      </div>
+
+                      {visibility === "classrooms" && (
+                        <div className="pt-2 space-y-2 border-t border-gray-200 mt-2">
+                          <p className="text-sm text-gray-600">Selecione as turmas</p>
+                          {classrooms.length === 0 ? (
+                            <p className="text-sm text-amber-700">
+                              Voce ainda nao tem turmas ativas. Crie uma em Minhas Salas.
+                            </p>
+                          ) : (
+                            <ul className="space-y-2 max-h-40 overflow-y-auto">
+                              {classrooms.map((c) => (
+                                <li key={c.id}>
+                                  <label className="flex items-center gap-2 text-sm cursor-pointer">
+                                    <input
+                                      type="checkbox"
+                                      checked={selectedClassroomIds.includes(c.id)}
+                                      onChange={() => toggleClassroom(c.id)}
+                                    />
+                                    <span>
+                                      {c.name}{" "}
+                                      <span className="text-gray-500">({c.subject})</span>
+                                    </span>
+                                  </label>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      )}
+                    </div>
+              </>
+            )}
+
+            {tipoSelecionado !== "artigo" &&
+              tipoSelecionado !== "dica" &&
+              tipoSelecionado !== "exercicios" &&
+              tipoSelecionado !== "avaliacao" &&
+              tipoSelecionado !== "simulado" &&
+              tipoSelecionado !== undefined && (
                 <div className="space-y-2">
                   <Label htmlFor="conteudo">Conteudo</Label>
                   <Textarea
@@ -700,28 +2449,20 @@ export function CriarConteudoClient({
                 </div>
               )}
 
-            {tipoSelecionado === "dica" && (
-              <div className="space-y-2">
-                <Label htmlFor="dica">Sua dica</Label>
-                <Textarea
-                  id="dica"
-                  placeholder="Compartilhe uma dica rapida, formula ou insight..."
-                  className="min-h-[150px]"
-                  maxLength={280}
-                />
-                <p className="text-xs text-gray-500 text-right">0/280 caracteres</p>
-              </div>
-            )}
-
-            {tipoSelecionado !== "artigo" && (
-              <div className="space-y-2">
-                <Label>Imagem de Capa (opcional)</Label>
-                <div className="border-2 border-dashed border-gray-200 rounded-xl p-6 text-center">
-                  <Upload className="h-8 w-8 text-gray-300 mx-auto mb-2" />
-                  <p className="text-sm text-gray-600">Arraste uma imagem ou clique para enviar</p>
+            {tipoSelecionado !== "artigo" &&
+              tipoSelecionado !== "dica" &&
+              tipoSelecionado !== "exercicios" &&
+              tipoSelecionado !== "avaliacao" &&
+              tipoSelecionado !== "simulado" &&
+              tipoSelecionado !== undefined && (
+                <div className="space-y-2">
+                  <Label>Imagem de Capa (opcional)</Label>
+                  <div className="border-2 border-dashed border-gray-200 rounded-xl p-6 text-center">
+                    <Upload className="h-8 w-8 text-gray-300 mx-auto mb-2" />
+                    <p className="text-sm text-gray-600">Arraste uma imagem ou clique para enviar</p>
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
 
             <div className="flex gap-4 pt-4 flex-wrap">
               <Button type="button" variant="outline" className="flex-1 min-w-[120px]" onClick={goBackFromEditor}>
@@ -743,6 +2484,124 @@ export function CriarConteudoClient({
                     type="button"
                     className="flex-1 min-w-[140px] bg-[#1D4ED8] hover:bg-[#1E3A8A] gap-2"
                     onClick={() => void handlePublishArticle()}
+                    disabled={
+                      publishing ||
+                      loadedArticleStatus === "verificando" ||
+                      loadedArticleStatus === "aguardando_decisao" ||
+                      !formData.titulo.trim() ||
+                      (visibility === "classrooms" && selectedClassroomIds.length === 0)
+                    }
+                  >
+                    {publishing ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : null}
+                    {loadedArticleStatus === "verificando"
+                      ? "Em analise..."
+                      : loadedArticleStatus === "aguardando_decisao"
+                        ? "Aguardando decisao"
+                        : loadedArticleStatus === "revisao"
+                          ? "Corrigir e Reenviar"
+                          : loadedArticleStatus === "published"
+                            ? "Salvar alteracoes"
+                            : "Publicar"}
+                  </Button>
+                </>
+              ) : tipoSelecionado === "exercicios" ? (
+                <>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="flex-1 min-w-[120px]"
+                    onClick={() => void handleSaveExerciseDraft()}
+                    disabled={publishing || !formData.titulo.trim()}
+                  >
+                    Salvar rascunho
+                  </Button>
+                  <Button
+                    type="button"
+                    className="flex-1 min-w-[140px] bg-[#1D4ED8] hover:bg-[#1E3A8A] gap-2"
+                    onClick={() => void handlePublishExercise()}
+                    disabled={
+                      publishing ||
+                      !formData.titulo.trim() ||
+                      (visibility === "classrooms" && selectedClassroomIds.length === 0)
+                    }
+                  >
+                    {publishing ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : null}
+                    {loadedArticleStatus === "published" ? "Salvar alteracoes" : "Publicar"}
+                  </Button>
+                </>
+              ) : tipoSelecionado === "avaliacao" ? (
+                <>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="flex-1 min-w-[120px]"
+                    onClick={() => void handleSaveAssessmentDraft()}
+                    disabled={publishing || !formData.titulo.trim()}
+                  >
+                    Salvar rascunho
+                  </Button>
+                  <Button
+                    type="button"
+                    className="flex-1 min-w-[140px] bg-[#1D4ED8] hover:bg-[#1E3A8A] gap-2"
+                    onClick={() => void handlePublishAssessment()}
+                    disabled={
+                      publishing ||
+                      !formData.titulo.trim() ||
+                      (visibility === "classrooms" && selectedClassroomIds.length === 0)
+                    }
+                  >
+                    {publishing ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : null}
+                    {loadedArticleStatus === "published" ? "Salvar alteracoes" : "Publicar"}
+                  </Button>
+                </>
+              ) : tipoSelecionado === "simulado" ? (
+                <>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="flex-1 min-w-[120px]"
+                    onClick={() => void handleSaveSimuladoDraft()}
+                    disabled={publishing || !formData.titulo.trim()}
+                  >
+                    Salvar rascunho
+                  </Button>
+                  <Button
+                    type="button"
+                    className="flex-1 min-w-[140px] bg-[#1D4ED8] hover:bg-[#1E3A8A] gap-2"
+                    onClick={() => void handlePublishSimulado()}
+                    disabled={
+                      publishing ||
+                      !formData.titulo.trim() ||
+                      (visibility === "classrooms" && selectedClassroomIds.length === 0)
+                    }
+                  >
+                    {publishing ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : null}
+                    {loadedArticleStatus === "published" ? "Salvar alteracoes" : "Publicar"}
+                  </Button>
+                </>
+              ) : tipoSelecionado === "dica" ? (
+                <>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="flex-1 min-w-[120px]"
+                    onClick={() => void handleSaveDicaDraft()}
+                    disabled={publishing || !formData.titulo.trim()}
+                  >
+                    Salvar rascunho
+                  </Button>
+                  <Button
+                    type="button"
+                    className="flex-1 min-w-[140px] bg-[#1D4ED8] hover:bg-[#1E3A8A] gap-2"
+                    onClick={() => void handlePublishDica()}
                     disabled={
                       publishing ||
                       !formData.titulo.trim() ||
@@ -770,6 +2629,20 @@ export function CriarConteudoClient({
           </form>
         </div>
       )}
+
+      <ContentReviewDialog
+        contentItemId={articleDraftId}
+        status={
+          loadedArticleStatus === "revisao" || loadedArticleStatus === "aguardando_decisao"
+            ? loadedArticleStatus
+            : null
+        }
+        open={showEditorReviewDialog}
+        onOpenChange={(o) => {
+          setShowEditorReviewDialog(o)
+          if (!o) router.refresh()
+        }}
+      />
 
       <Dialog open={isReviewing} onOpenChange={() => {}}>
         <DialogContent className="sm:max-w-md">
@@ -892,6 +2765,10 @@ export function CriarConteudoClient({
                   onClick={() => {
                     setShowReviewDialog(false)
                     if (tipoSelecionado === "artigo") void handlePublishArticle()
+                    else if (tipoSelecionado === "exercicios") void handlePublishExercise()
+                    else if (tipoSelecionado === "avaliacao") void handlePublishAssessment()
+                    else if (tipoSelecionado === "simulado") void handlePublishSimulado()
+                    else if (tipoSelecionado === "dica") void handlePublishDica()
                     else router.push("/dashboard/professor?published=true")
                   }}
                 >

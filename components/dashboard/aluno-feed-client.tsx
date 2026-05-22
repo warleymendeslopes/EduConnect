@@ -1,6 +1,6 @@
 "use client"
 
-import type { FeedArticle } from "@/app/actions/content-items"
+import type { FeedContentItem } from "@/app/actions/content-items"
 import { recordContentShare, toggleContentLike } from "@/app/actions/content-items"
 import { ArticleCoverMedia } from "@/components/dashboard/article-cover-media"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
@@ -16,6 +16,8 @@ import {
   FileText,
   Flame,
   Heart,
+  Lightbulb,
+  ListChecks,
   MessageCircle,
   Play,
   Share2,
@@ -25,6 +27,8 @@ import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { useState } from "react"
 import { toast } from "sonner"
+import { parseExamFromSettings } from "@/lib/activities/exam"
+import { parseAssessmentSettings } from "@/lib/content/assessment-settings"
 
 const stories = [
   { id: 1, name: "Prof. Maria", avatar: "MS", color: "from-pink-500 to-purple-500", hasNew: true },
@@ -76,7 +80,7 @@ function initials(name: string | null | undefined): string {
 }
 
 type Props = {
-  initialArticles?: FeedArticle[]
+  initialArticles?: FeedContentItem[]
   initialLikedIds?: string[]
 }
 
@@ -207,9 +211,56 @@ export function AlunoFeedClient({
             {initialArticles.map((item) => {
               const c = counts[item.id] ?? { likes: item.like_count, shares: item.share_count }
               const liked = !!likedMap[item.id]
-              const disciplina = item.settings?.disciplina ?? "Artigo"
-              const cover = item.settings?.coverUrl?.trim() || null
-              const coverVideo = item.settings?.coverVideoUrl?.trim() || null
+              const isExercise = item.type === "exercise"
+              const isAssessment = item.type === "assessment"
+              const isSimulado = item.type === "simulado"
+              const isDica = item.type === "dica"
+              const isExamLike = isExercise || isAssessment || isSimulado
+              const qCount = isExamLike
+                ? parseExamFromSettings(item.settings as Record<string, unknown>)
+                    ?.questions.length ?? 0
+                : 0
+              const aset = parseAssessmentSettings(item.settings as Record<string, unknown>)
+              const dueLine =
+                (isAssessment || isSimulado) && aset.dueAt
+                  ? `Prazo: ${new Date(aset.dueAt).toLocaleString("pt-BR")}`
+                  : null
+              const disciplina =
+                item.settings?.disciplina ??
+                (isSimulado
+                  ? "Simulado"
+                  : isAssessment
+                    ? "Avaliacao"
+                    : isExercise
+                      ? "Exercicio"
+                      : isDica
+                        ? "Dica rapida"
+                        : "Artigo")
+              const dicaVid =
+                isDica && item.settings && typeof item.settings === "object"
+                  ? String(
+                      (item.settings as { dicaVideoUrl?: string }).dicaVideoUrl ?? ""
+                    ).trim() || null
+                  : null
+              const dicaImgs =
+                isDica &&
+                item.settings &&
+                typeof item.settings === "object" &&
+                Array.isArray((item.settings as { dicaImageUrls?: unknown }).dicaImageUrls)
+                  ? ((item.settings as { dicaImageUrls: string[] }).dicaImageUrls ?? []).filter(
+                      (x): x is string => typeof x === "string" && x.trim().length > 0
+                    )
+                  : []
+              const cover = isDica
+                ? dicaVid
+                  ? null
+                  : dicaImgs[0]?.trim() || null
+                : item.settings?.coverUrl?.trim() || null
+              const coverVideo = isExamLike
+                ? null
+                : isDica
+                  ? dicaVid
+                  : item.settings?.coverVideoUrl?.trim() || null
               return (
                 <div key={item.id} className="bg-white rounded-xl border border-gray-100 overflow-hidden">
                   <div className="p-4 flex items-center justify-between">
@@ -227,6 +278,21 @@ export function AlunoFeedClient({
                         <Badge variant="secondary" className="text-xs ml-2">
                           {disciplina}
                         </Badge>
+                        {isExamLike ? (
+                          <Badge variant="outline" className="text-xs ml-1">
+                            {qCount} questoes
+                          </Badge>
+                        ) : null}
+                        {isDica ? (
+                          <Badge variant="outline" className="text-xs ml-1">
+                            Dica rapida
+                          </Badge>
+                        ) : null}
+                        {dueLine ? (
+                          <span className="text-xs text-gray-500 ml-1 block sm:inline">
+                            {dueLine}
+                          </span>
+                        ) : null}
                       </div>
                     </div>
                   </div>
@@ -235,7 +301,17 @@ export function AlunoFeedClient({
                     <h3 className="font-display font-semibold text-lg text-gray-900 mb-2">{item.title}</h3>
                     <div className="flex items-center gap-2 text-sm text-[#10B981] mb-3">
                       <Sparkles className="h-4 w-4" />
-                      <span>Artigo publicado na plataforma</span>
+                      <span>
+                        {isSimulado
+                          ? "Simulado publicado na plataforma"
+                          : isAssessment
+                            ? "Avaliacao publicada na plataforma"
+                            : isExercise
+                              ? "Exercicio publicado na plataforma"
+                              : isDica
+                                ? "Dica publicada na plataforma"
+                                : "Artigo publicado na plataforma"}
+                      </span>
                     </div>
                     <div className="bg-gray-100 rounded-lg aspect-video flex items-center justify-center mb-3 overflow-hidden">
                       {coverVideo || cover ? (
@@ -246,10 +322,20 @@ export function AlunoFeedClient({
                         />
                       ) : (
                         <div className="flex flex-col items-center gap-2 text-gray-400">
-                          <BookOpen className="h-12 w-12" />
+                          {isExamLike ? (
+                            <ListChecks className="h-12 w-12" />
+                          ) : isDica ? (
+                            <Lightbulb className="h-12 w-12" />
+                          ) : (
+                            <BookOpen className="h-12 w-12" />
+                          )}
                           <span className="text-sm flex items-center gap-1">
                             <Clock className="h-4 w-4" />
-                            Leitura
+                            {isExamLike
+                              ? `${qCount} questoes`
+                              : isDica
+                                ? "Dica"
+                                : "Leitura"}
                           </span>
                         </div>
                       )}
@@ -295,7 +381,13 @@ export function AlunoFeedClient({
                       className="w-full bg-[#1D4ED8] hover:bg-[#1E3A8A]"
                       onClick={() => router.push(`/conteudo/${item.id}`)}
                     >
-                      Ler agora
+                      {isAssessment
+                        ? "Fazer avaliacao"
+                        : isExercise
+                          ? "Praticar agora"
+                          : isDica
+                            ? "Ver dica"
+                            : "Ler agora"}
                     </Button>
                   </div>
                 </div>

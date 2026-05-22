@@ -69,7 +69,10 @@ export function TrixArticleBody({
         }
         try {
           cid = await ensureContentItemId()
-        } catch {
+        } catch (err) {
+          toast.error(
+            err instanceof Error ? err.message : "Erro ao preparar rascunho para o envio"
+          )
           attachment.remove()
           return
         }

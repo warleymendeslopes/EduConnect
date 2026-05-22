@@ -14,6 +14,8 @@ export type ExamQuestionMcq = {
   options: string[]
   correctIndex: number
   points: number
+  /** Simulado multidisciplinar: rotulo da area (ex.: Matematica) */
+  disciplina?: string
 }
 
 export type ExamQuestionOpen = {
@@ -22,6 +24,7 @@ export type ExamQuestionOpen = {
   type: "open"
   prompt: string
   points: number
+  disciplina?: string
 }
 
 export type ExamQuestion = ExamQuestionMcq | ExamQuestionOpen
@@ -66,6 +69,11 @@ export function parseExamFromSettings(
     const prompt = typeof q.prompt === "string" ? q.prompt.trim() : ""
     const points = typeof q.points === "number" && q.points > 0 ? q.points : 0
     if (!prompt || points <= 0) continue
+    const rawDisc = q.disciplina
+    const disciplina =
+      typeof rawDisc === "string" && rawDisc.trim()
+        ? rawDisc.trim()
+        : undefined
     if (type === "mcq") {
       const options = Array.isArray(q.options)
         ? q.options.filter((x): x is string => typeof x === "string" && x.trim().length > 0)
@@ -80,9 +88,17 @@ export function parseExamFromSettings(
         options,
         correctIndex,
         points,
+        ...(disciplina ? { disciplina } : {}),
       })
     } else {
-      questions.push({ id, order, type: "open", prompt, points })
+      questions.push({
+        id,
+        order,
+        type: "open",
+        prompt,
+        points,
+        ...(disciplina ? { disciplina } : {}),
+      })
     }
   }
   if (questions.length === 0) return null
@@ -112,6 +128,18 @@ export function validateExamDefinition(
         return "Indice da resposta correta invalido"
       }
     }
+  }
+  return null
+}
+
+/** Publicacao de simulado: toda questao deve ter disciplina preenchida. */
+export function validateExamQuestionDisciplinas(
+  exam: ActivityExamDefinition | null
+): string | null {
+  if (!exam) return null
+  for (const q of exam.questions) {
+    const d = q.disciplina?.trim()
+    if (!d) return "Defina a disciplina de cada questao no simulado"
   }
   return null
 }

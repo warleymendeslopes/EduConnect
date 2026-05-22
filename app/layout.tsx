@@ -51,8 +51,11 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="pt-BR">
-      <body className={`${sora.variable} ${dmSans.variable} ${jetbrainsMono.variable} font-sans antialiased`}>
+    <html lang="pt-BR" suppressHydrationWarning>
+      <body
+        suppressHydrationWarning
+        className={`${sora.variable} ${dmSans.variable} ${jetbrainsMono.variable} font-sans antialiased`}
+      >
         {children}
         <Toaster richColors position="top-center" />
         <Analytics />
