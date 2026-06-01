@@ -10,7 +10,8 @@ import {
   startOfWeek,
   subDays,
 } from "date-fns"
-import { createClient } from "@/lib/supabase/server"
+import { requireAuthedUser } from "@/lib/auth/user"
+import { query, queryOne } from "@/lib/db/query"
 import { parseExamFromSettings } from "@/lib/activities/exam"
 import type { ClassroomActivityRow } from "@/lib/activities/types"
 import type {
@@ -30,37 +31,38 @@ const PLAN_PATH = "/dashboard/aluno/plano"
 const STREAK_LOOKBACK_DAYS = 400
 
 async function computePlannerStreakDays(
-  supabase: Awaited<ReturnType<typeof createClient>>,
   studentId: string
 ): Promise<number> {
   const cutoff = subDays(new Date(), STREAK_LOOKBACK_DAYS).toISOString()
 
-  const [personalRes, subRes] = await Promise.all([
-    supabase
-      .from("student_planner_personal_tasks")
-      .select("done_at")
-      .eq("student_id", studentId)
-      .eq("is_done", true)
-      .not("done_at", "is", null)
-      .gte("done_at", cutoff),
-    supabase
-      .from("classroom_activity_submissions")
-      .select("submitted_at")
-      .eq("student_id", studentId)
-      .eq("status", "enviado")
-      .not("submitted_at", "is", null)
-      .gte("submitted_at", cutoff),
+  const [personalRows, subRows] = await Promise.all([
+    query<{ done_at: string | null }>(
+      `select done_at
+       from public.student_planner_personal_tasks
+       where student_id = $1
+         and is_done = true
+         and done_at is not null
+         and done_at >= $2`,
+      [studentId, cutoff]
+    ).catch(() => []),
+    query<{ submitted_at: string | null }>(
+      `select submitted_at
+       from public.classroom_activity_submissions
+       where student_id = $1
+         and status = 'enviado'
+         and submitted_at is not null
+         and submitted_at >= $2`,
+      [studentId, cutoff]
+    ).catch(() => []),
   ])
 
-  if (personalRes.error || subRes.error) return 0
-
   const activeDays = new Set<string>()
-  for (const r of personalRes.data ?? []) {
-    const t = r.done_at as string | null
+  for (const r of personalRows ?? []) {
+    const t = r.done_at
     if (t) activeDays.add(toLocalDateIso(t, STREAK_TIMEZONE))
   }
-  for (const r of subRes.data ?? []) {
-    const t = r.submitted_at as string | null
+  for (const r of subRows ?? []) {
+    const t = r.submitted_at
     if (t) activeDays.add(toLocalDateIso(t, STREAK_TIMEZONE))
   }
 
@@ -98,10 +100,7 @@ const WEEKDAY_SHORT_PT = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sab"]
 export async function getPlannerWeek(
   weekStartIso?: string
 ): Promise<PlannerWeekPayload> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) {
     return {
       weekStartIso: "",
@@ -120,11 +119,10 @@ export async function getPlannerWeek(
     }
   }
 
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("user_type")
-    .eq("id", user.id)
-    .maybeSingle()
+  const profile = await queryOne<{ user_type: string }>(
+    "select user_type from public.profiles where id = $1",
+    [user.id]
+  )
 
   if (profile?.user_type !== "aluno") {
     return {
@@ -144,19 +142,21 @@ export async function getPlannerWeek(
     }
   }
 
-  const streakDays = await computePlannerStreakDays(supabase, user.id)
+  const streakDays = await computePlannerStreakDays(user.id)
 
   const monday = toWeekMonday(weekStartIso)
   const sunday = addDays(monday, 6)
   const weekStartStr = isoDate(monday)
   const weekEndStr = isoDate(sunday)
 
-  const { data: members, error: mErr } = await supabase
-    .from("classroom_members")
-    .select("classroom_id")
-    .eq("student_id", user.id)
-
-  if (mErr) {
+  let members: { classroom_id: string }[] = []
+  try {
+    members =
+      (await query<{ classroom_id: string }>(
+        "select classroom_id from public.classroom_members where student_id = $1",
+        [user.id]
+      )) ?? []
+  } catch (e: any) {
     return {
       weekStartIso: weekStartStr,
       weekEndIso: weekEndStr,
@@ -170,40 +170,43 @@ export async function getPlannerWeek(
         classroomSubmitted: 0,
         streakDays,
       },
-      error: mErr.message,
+      error: e?.message ?? "Erro ao carregar salas",
     }
   }
 
-  const classroomIds = (members ?? []).map((m) => m.classroom_id as string)
+  const classroomIds = (members ?? []).map((m) => m.classroom_id)
   const roomMeta = new Map<
     string,
     { name: string; subject: string }
   >()
 
   if (classroomIds.length > 0) {
-    const { data: rooms } = await supabase
-      .from("classrooms")
-      .select("id, name, subject")
-      .in("id", classroomIds)
+    const rooms = await query<{ id: string; name: string | null; subject: string | null }>(
+      "select id, name, subject from public.classrooms where id = any($1::uuid[])",
+      [classroomIds]
+    ).catch(() => [])
 
     for (const r of rooms ?? []) {
-      roomMeta.set(r.id as string, {
-        name: (r.name as string) ?? "Sala",
-        subject: (r.subject as string) ?? "",
+      roomMeta.set(r.id, {
+        name: r.name ?? "Sala",
+        subject: r.subject ?? "",
       })
     }
   }
 
   let activities: ClassroomActivityRow[] = []
   if (classroomIds.length > 0) {
-    const { data: actRows, error: aErr } = await supabase
-      .from("classroom_activities")
-      .select("*")
-      .in("classroom_id", classroomIds)
-      .neq("status", "rascunho")
-      .order("due_at", { ascending: true, nullsFirst: false })
+    const actRows = await query<ClassroomActivityRow>(
+      `select *
+       from public.classroom_activities
+       where classroom_id = any($1::uuid[])
+         and status <> 'rascunho'
+       order by due_at asc nulls last`,
+      [classroomIds]
+    ).catch((e: any) => ({ __err: e }))
 
-    if (aErr) {
+    if ((actRows as any)?.__err) {
+      const e = (actRows as any).__err as any
       return {
         weekStartIso: weekStartStr,
         weekEndIso: weekEndStr,
@@ -217,24 +220,26 @@ export async function getPlannerWeek(
           classroomSubmitted: 0,
           streakDays,
         },
-        error: aErr.message,
+        error: e?.message ?? "Erro ao carregar atividades",
       }
     }
-    activities = (actRows ?? []) as ClassroomActivityRow[]
+    activities = (actRows as any) ?? []
   }
 
   const activityIds = activities.map((a) => a.id)
   const submissionByActivity = new Map<string, "rascunho" | "enviado">()
   if (activityIds.length > 0) {
-    const { data: subs } = await supabase
-      .from("classroom_activity_submissions")
-      .select("activity_id, status")
-      .eq("student_id", user.id)
-      .in("activity_id", activityIds)
+    const subs = await query<{ activity_id: string; status: string }>(
+      `select activity_id, status
+       from public.classroom_activity_submissions
+       where student_id = $1
+         and activity_id = any($2::uuid[])`,
+      [user.id, activityIds]
+    ).catch(() => [])
 
     for (const s of subs ?? []) {
-      const aid = s.activity_id as string
-      const st = s.status as string
+      const aid = s.activity_id
+      const st = s.status
       if (st === "rascunho" || st === "enviado") {
         submissionByActivity.set(aid, st)
       }
@@ -283,15 +288,19 @@ export async function getPlannerWeek(
     byDate.set(dk, list)
   }
 
-  const { data: personalRows, error: pErr } = await supabase
-    .from("student_planner_personal_tasks")
-    .select("*")
-    .eq("student_id", user.id)
-    .gte("scheduled_on", weekStartStr)
-    .lte("scheduled_on", weekEndStr)
-    .order("scheduled_on", { ascending: true })
-
-  if (pErr) {
+  let personalRows: Record<string, unknown>[] = []
+  try {
+    personalRows =
+      (await query<Record<string, unknown>>(
+        `select *
+         from public.student_planner_personal_tasks
+         where student_id = $1
+           and scheduled_on >= $2::date
+           and scheduled_on <= $3::date
+         order by scheduled_on asc`,
+        [user.id, weekStartStr, weekEndStr]
+      )) ?? []
+  } catch (e: any) {
     return {
       weekStartIso: weekStartStr,
       weekEndIso: weekEndStr,
@@ -305,7 +314,7 @@ export async function getPlannerWeek(
         classroomSubmitted: 0,
         streakDays,
       },
-      error: pErr.message,
+      error: e?.message ?? "Erro",
     }
   }
 
@@ -392,10 +401,7 @@ export async function createPersonalPlannerTask(input: {
   notes?: string
   scheduledOn: string
 }): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
   const title = input.title.trim()
@@ -406,52 +412,61 @@ export async function createPersonalPlannerTask(input: {
     return { ok: false, error: "Data invalida" }
   }
 
-  const { data, error } = await supabase
-    .from("student_planner_personal_tasks")
-    .insert({
-      student_id: user.id,
-      title,
-      notes: input.notes?.trim() || null,
-      scheduled_on: scheduled,
-      is_done: false,
-    })
-    .select("id")
-    .single()
-
-  if (error || !data) return { ok: false, error: error?.message ?? "Erro" }
-  revalidatePath(PLAN_PATH)
-  return { ok: true, id: data.id as string }
+  try {
+    const data = await queryOne<{ id: string }>(
+      `insert into public.student_planner_personal_tasks
+         (student_id, title, notes, scheduled_on, is_done)
+       values ($1, $2, $3, $4::date, false)
+       returning id`,
+      [user.id, title, input.notes?.trim() || null, scheduled]
+    )
+    if (!data) return { ok: false, error: "Erro" }
+    revalidatePath(PLAN_PATH)
+    return { ok: true, id: data.id }
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro" }
+  }
 }
 
 export async function updatePersonalPlannerTask(
   id: string,
   input: { title?: string; notes?: string | null; scheduledOn?: string }
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const patch: Record<string, unknown> = {}
-  if (input.title !== undefined) patch.title = input.title.trim()
-  if (input.notes !== undefined) patch.notes = input.notes
+  const sets: string[] = []
+  const params: unknown[] = [id, user.id]
+  let p = params.length
+
+  if (input.title !== undefined) {
+    sets.push(`title = $${++p}`)
+    params.push(input.title.trim())
+  }
+  if (input.notes !== undefined) {
+    sets.push(`notes = $${++p}`)
+    params.push(input.notes)
+  }
   if (input.scheduledOn !== undefined) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(input.scheduledOn)) {
       return { ok: false, error: "Data invalida" }
     }
-    patch.scheduled_on = input.scheduledOn
+    sets.push(`scheduled_on = $${++p}::date`)
+    params.push(input.scheduledOn)
   }
 
-  if (Object.keys(patch).length === 0) return { ok: true }
+  if (sets.length === 0) return { ok: true }
 
-  const { error } = await supabase
-    .from("student_planner_personal_tasks")
-    .update(patch)
-    .eq("id", id)
-    .eq("student_id", user.id)
-
-  if (error) return { ok: false, error: error.message }
+  try {
+    await query(
+      `update public.student_planner_personal_tasks
+       set ${sets.join(", ")}
+       where id = $1 and student_id = $2`,
+      params
+    )
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro" }
+  }
   revalidatePath(PLAN_PATH)
   return { ok: true }
 }
@@ -459,19 +474,17 @@ export async function updatePersonalPlannerTask(
 export async function deletePersonalPlannerTask(
   id: string
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const { error } = await supabase
-    .from("student_planner_personal_tasks")
-    .delete()
-    .eq("id", id)
-    .eq("student_id", user.id)
-
-  if (error) return { ok: false, error: error.message }
+  try {
+    await query(
+      "delete from public.student_planner_personal_tasks where id = $1 and student_id = $2",
+      [id, user.id]
+    )
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro" }
+  }
   revalidatePath(PLAN_PATH)
   return { ok: true }
 }
@@ -480,24 +493,22 @@ export async function togglePersonalPlannerTaskDone(
   id: string,
   isDone: boolean
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
   const doneAt = isDone ? new Date().toISOString() : null
 
-  const { error } = await supabase
-    .from("student_planner_personal_tasks")
-    .update({
-      is_done: isDone,
-      done_at: doneAt,
-    })
-    .eq("id", id)
-    .eq("student_id", user.id)
-
-  if (error) return { ok: false, error: error.message }
+  try {
+    await query(
+      `update public.student_planner_personal_tasks
+       set is_done = $3,
+           done_at = $4
+       where id = $1 and student_id = $2`,
+      [id, user.id, isDone, doneAt]
+    )
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro" }
+  }
   revalidatePath(PLAN_PATH)
   return { ok: true }
 }

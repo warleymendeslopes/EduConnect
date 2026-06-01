@@ -1,7 +1,8 @@
 "use server"
 
 import { revalidatePath } from "next/cache"
-import { createClient } from "@/lib/supabase/server"
+import { requireAuthedUser } from "@/lib/auth/user"
+import { query, queryOne } from "@/lib/db/query"
 import {
   type ActivityExamDefinition,
   type ActivityExamPublic,
@@ -98,19 +99,20 @@ function revalidateContentExercisePaths(contentItemId: string) {
 export async function getExamForContentExercise(
   contentItemId: string
 ): Promise<{ ok: true; exam: ActivityExamPublic } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const { data: row, error } = await supabase
-    .from("content_items")
-    .select("settings, status, type, author_id")
-    .eq("id", contentItemId)
-    .maybeSingle()
+  type ItemRow = {
+    settings: Record<string, unknown>
+    status: string
+    type: string
+    author_id: string
+  }
+  const row = await queryOne<ItemRow>(
+    "select settings, status, type, author_id from public.content_items where id = $1",
+    [contentItemId]
+  )
 
-  if (error) return { ok: false, error: error.message }
   if (!row || !isExamLikeContentType(row.type)) {
     return { ok: false, error: "Conteudo nao encontrado" }
   }
@@ -122,12 +124,10 @@ export async function getExamForContentExercise(
   }
 
   if (isTimedExamContentType(row.type)) {
-    const { data: sub } = await supabase
-      .from("content_exercise_submissions")
-      .select("status")
-      .eq("content_item_id", contentItemId)
-      .eq("student_id", user.id)
-      .maybeSingle()
+    const sub = await queryOne<{ status: string }>(
+      "select status from public.content_exercise_submissions where content_item_id = $1 and student_id = $2",
+      [contentItemId, user.id]
+    )
     if (sub?.status !== "enviado") {
       const settings = row.settings as Record<string, unknown>
       const p = parseAssessmentSettings(settings)
@@ -163,41 +163,42 @@ export async function getMyContentExerciseSubmission(
   submission: ContentExerciseSubmissionRow | null
   error: string | null
 }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { submission: null, error: "Nao autenticado" }
 
-  const { data, error } = await supabase
-    .from("content_exercise_submissions")
-    .select("*")
-    .eq("content_item_id", contentItemId)
-    .eq("student_id", user.id)
-    .maybeSingle()
-
-  if (error) return { submission: null, error: error.message }
-  if (!data) return { submission: null, error: null }
-  return { submission: mapRow(data as Record<string, unknown>), error: null }
+  try {
+    const data = await queryOne<Record<string, unknown>>(
+      "select * from public.content_exercise_submissions where content_item_id = $1 and student_id = $2",
+      [contentItemId, user.id]
+    )
+    if (!data) return { submission: null, error: null }
+    return { submission: mapRow(data), error: null }
+  } catch (e: any) {
+    return { submission: null, error: e?.message ?? "Erro" }
+  }
 }
 
 export async function saveContentExerciseDraft(
   contentItemId: string,
   answers: StudentExamAnswers
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const { data: item, error: itemErr } = await supabase
-    .from("content_items")
-    .select("id, status, settings, type, author_id")
-    .eq("id", contentItemId)
-    .maybeSingle()
+  type ItemRow = {
+    id: string
+    status: string
+    settings: Record<string, unknown>
+    type: string
+    author_id: string
+  }
 
-  if (itemErr || !item) return { ok: false, error: "Conteudo nao encontrado" }
+  const item = await queryOne<ItemRow>(
+    "select id, status, settings, type, author_id from public.content_items where id = $1",
+    [contentItemId]
+  )
+
+  if (!item) return { ok: false, error: "Conteudo nao encontrado" }
   if (!isExamLikeContentType(item.type)) {
     return { ok: false, error: "Conteudo nao encontrado" }
   }
@@ -226,12 +227,10 @@ export async function saveContentExerciseDraft(
     }
   }
 
-  const { data: existing } = await supabase
-    .from("content_exercise_submissions")
-    .select("id, status")
-    .eq("content_item_id", contentItemId)
-    .eq("student_id", user.id)
-    .maybeSingle()
+  const existing = await queryOne<{ id: string; status: string }>(
+    "select id, status from public.content_exercise_submissions where content_item_id = $1 and student_id = $2",
+    [contentItemId, user.id]
+  )
 
   if (existing?.status === "enviado") {
     return { ok: false, error: "Prova ja enviada" }
@@ -245,24 +244,30 @@ export async function saveContentExerciseDraft(
   }
 
   if (existing) {
-    const { error } = await supabase
-      .from("content_exercise_submissions")
-      .update({
-        answers: sanitized,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", existing.id)
-      .eq("status", "rascunho")
-
-    if (error) return { ok: false, error: error.message }
+    try {
+      await query(
+        `update public.content_exercise_submissions
+         set answers = $3::jsonb
+         where id = $1 and status = 'rascunho' and student_id = $2`,
+        [existing.id, user.id, JSON.stringify(sanitized)]
+      )
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? "Erro" }
+    }
   } else {
-    const { error } = await supabase.from("content_exercise_submissions").insert({
-      content_item_id: contentItemId,
-      student_id: user.id,
-      status: "rascunho",
-      answers: sanitized,
-    })
-    if (error) return { ok: false, error: error.message }
+    try {
+      await query(
+        `insert into public.content_exercise_submissions
+           (content_item_id, student_id, status, answers)
+         values ($1, $2, 'rascunho', $3::jsonb)
+         on conflict (content_item_id, student_id)
+         do update set answers = excluded.answers
+         where public.content_exercise_submissions.status = 'rascunho'`,
+        [contentItemId, user.id, JSON.stringify(sanitized)]
+      )
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? "Erro" }
+    }
   }
 
   revalidateContentExercisePaths(contentItemId)
@@ -273,19 +278,22 @@ export async function submitContentExercise(
   contentItemId: string,
   answers: StudentExamAnswers
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const { data: item, error: actErr } = await supabase
-    .from("content_items")
-    .select("settings, status, type, author_id")
-    .eq("id", contentItemId)
-    .maybeSingle()
+  type ItemRow = {
+    settings: Record<string, unknown>
+    status: string
+    type: string
+    author_id: string
+  }
 
-  if (actErr || !item) return { ok: false, error: "Conteudo nao encontrado" }
+  const item = await queryOne<ItemRow>(
+    "select settings, status, type, author_id from public.content_items where id = $1",
+    [contentItemId]
+  )
+
+  if (!item) return { ok: false, error: "Conteudo nao encontrado" }
   if (!isExamLikeContentType(item.type)) {
     return { ok: false, error: "Conteudo nao encontrado" }
   }
@@ -325,12 +333,10 @@ export async function submitContentExercise(
   const scoreMcq = computeMcqScore(exam, sanitized)
   const now = new Date().toISOString()
 
-  const { data: existing } = await supabase
-    .from("content_exercise_submissions")
-    .select("id, status")
-    .eq("content_item_id", contentItemId)
-    .eq("student_id", user.id)
-    .maybeSingle()
+  const existing = await queryOne<{ id: string; status: string }>(
+    "select id, status from public.content_exercise_submissions where content_item_id = $1 and student_id = $2",
+    [contentItemId, user.id]
+  )
 
   if (existing?.status === "enviado") {
     return { ok: false, error: "Prova ja enviada" }
@@ -340,32 +346,57 @@ export async function submitContentExercise(
   const scoreTotal = scoreMcq + sumOpenScores(exam, openScores)
 
   if (existing) {
-    const { error } = await supabase
-      .from("content_exercise_submissions")
-      .update({
-        answers: sanitized,
-        status: "enviado",
-        score_mcq: scoreMcq,
-        open_scores: openScores,
-        score_total: scoreTotal,
-        submitted_at: now,
-      })
-      .eq("id", existing.id)
-      .eq("status", "rascunho")
-
-    if (error) return { ok: false, error: error.message }
+    try {
+      await query(
+        `update public.content_exercise_submissions
+         set answers = $3::jsonb,
+             status = 'enviado',
+             score_mcq = $4,
+             open_scores = $5::jsonb,
+             score_total = $6,
+             submitted_at = $7
+         where id = $1 and student_id = $2 and status = 'rascunho'`,
+        [
+          existing.id,
+          user.id,
+          JSON.stringify(sanitized),
+          scoreMcq,
+          JSON.stringify(openScores),
+          scoreTotal,
+          now,
+        ]
+      )
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? "Erro" }
+    }
   } else {
-    const { error } = await supabase.from("content_exercise_submissions").insert({
-      content_item_id: contentItemId,
-      student_id: user.id,
-      status: "enviado",
-      answers: sanitized,
-      score_mcq: scoreMcq,
-      open_scores: openScores,
-      score_total: scoreTotal,
-      submitted_at: now,
-    })
-    if (error) return { ok: false, error: error.message }
+    try {
+      await query(
+        `insert into public.content_exercise_submissions
+           (content_item_id, student_id, status, answers, score_mcq, open_scores, score_total, submitted_at)
+         values ($1, $2, 'enviado', $3::jsonb, $4, $5::jsonb, $6, $7)
+         on conflict (content_item_id, student_id)
+         do update set
+           status = 'enviado',
+           answers = excluded.answers,
+           score_mcq = excluded.score_mcq,
+           open_scores = excluded.open_scores,
+           score_total = excluded.score_total,
+           submitted_at = excluded.submitted_at
+         where public.content_exercise_submissions.status = 'rascunho'`,
+        [
+          contentItemId,
+          user.id,
+          JSON.stringify(sanitized),
+          scoreMcq,
+          JSON.stringify(openScores),
+          scoreTotal,
+          now,
+        ]
+      )
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? "Erro" }
+    }
   }
 
   revalidateContentExercisePaths(contentItemId)
@@ -379,44 +410,38 @@ export type ContentExerciseSubmissionListItem = ContentExerciseSubmissionRow & {
 export async function listContentExerciseSubmissionsForAuthor(
   contentItemId: string
 ): Promise<{ rows: ContentExerciseSubmissionListItem[]; error: string | null }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { rows: [], error: "Nao autenticado" }
 
-  const { data: item } = await supabase
-    .from("content_items")
-    .select("id, author_id, type")
-    .eq("id", contentItemId)
-    .maybeSingle()
+  const item = await queryOne<{ author_id: string; type: string }>(
+    "select author_id, type from public.content_items where id = $1",
+    [contentItemId]
+  )
 
-  if (
-    !item ||
-    item.author_id !== user.id ||
-    !isExamLikeContentType(item.type)
-  ) {
+  if (!item || item.author_id !== user.id || !isExamLikeContentType(item.type)) {
     return { rows: [], error: "Conteudo nao encontrado" }
   }
 
-  const { data, error } = await supabase
-    .from("content_exercise_submissions")
-    .select("*")
-    .eq("content_item_id", contentItemId)
-    .order("submitted_at", { ascending: false, nullsFirst: false })
+  let subs: Record<string, unknown>[] = []
+  try {
+    subs =
+      (await query<Record<string, unknown>>(
+        "select * from public.content_exercise_submissions where content_item_id = $1 order by submitted_at desc nulls last",
+        [contentItemId]
+      )) ?? []
+  } catch (e: any) {
+    return { rows: [], error: e?.message ?? "Erro" }
+  }
 
-  if (error) return { rows: [], error: error.message }
-
-  const subs = (data ?? []) as Record<string, unknown>[]
   const studentIds = [...new Set(subs.map((s) => s.student_id as string))]
   let nameById = new Map<string, string | null>()
   if (studentIds.length > 0) {
-    const { data: profs } = await supabase
-      .from("profiles")
-      .select("id, full_name")
-      .in("id", studentIds)
+    const profs = await query<{ id: string; full_name: string | null }>(
+      "select id, full_name from public.profiles where id = any($1::uuid[])",
+      [studentIds]
+    )
     nameById = new Map(
-      (profs ?? []).map((p) => [p.id as string, p.full_name as string | null])
+      (profs ?? []).map((p) => [p.id as string, p.full_name])
     )
   }
 
@@ -436,17 +461,13 @@ export async function gradeContentExerciseOpenAnswers(
   submissionId: string,
   openScores: Record<string, number>
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const { data: ci } = await supabase
-    .from("content_items")
-    .select("settings, author_id, type")
-    .eq("id", contentItemId)
-    .maybeSingle()
+  const ci = await queryOne<{ settings: Record<string, unknown>; author_id: string; type: string }>(
+    "select settings, author_id, type from public.content_items where id = $1",
+    [contentItemId]
+  )
 
   if (!ci || ci.author_id !== user.id || !isExamLikeContentType(ci.type)) {
     return { ok: false, error: "Conteudo nao encontrado" }
@@ -469,14 +490,18 @@ export async function gradeContentExerciseOpenAnswers(
     merged[q.id] = v
   }
 
-  const { data: sub, error: fetchErr } = await supabase
-    .from("content_exercise_submissions")
-    .select("id, student_id, score_mcq, status, open_scores")
-    .eq("id", submissionId)
-    .eq("content_item_id", contentItemId)
-    .maybeSingle()
+  const sub = await queryOne<{
+    id: string
+    student_id: string
+    score_mcq: number
+    status: string
+    open_scores: unknown
+  }>(
+    "select id, student_id, score_mcq, status, open_scores from public.content_exercise_submissions where id = $1 and content_item_id = $2",
+    [submissionId, contentItemId]
+  )
 
-  if (fetchErr || !sub) return { ok: false, error: "Entrega nao encontrada" }
+  if (!sub) return { ok: false, error: "Entrega nao encontrada" }
   if (sub.status !== "enviado") {
     return { ok: false, error: "Apenas entregas enviadas podem ser corrigidas" }
   }
@@ -486,16 +511,17 @@ export async function gradeContentExerciseOpenAnswers(
   const scoreTotal =
     Number(sub.score_mcq ?? 0) + sumOpenScores(exam, nextOpen)
 
-  const { error } = await supabase
-    .from("content_exercise_submissions")
-    .update({
-      open_scores: nextOpen,
-      score_total: scoreTotal,
-    })
-    .eq("id", submissionId)
-    .eq("status", "enviado")
-
-  if (error) return { ok: false, error: error.message }
+  try {
+    await query(
+      `update public.content_exercise_submissions
+       set open_scores = $2::jsonb,
+           score_total = $3
+       where id = $1 and status = 'enviado'`,
+      [submissionId, JSON.stringify(nextOpen), scoreTotal]
+    )
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro" }
+  }
   revalidateContentExercisePaths(contentItemId)
   return { ok: true }
 }
@@ -504,12 +530,10 @@ export async function gradeContentExerciseOpenAnswers(
 export async function getMcqSolutionsForContentExercise(
   contentItemId: string
 ): Promise<Record<string, number> | null> {
-  const supabase = await createClient()
-  const { data: row } = await supabase
-    .from("content_items")
-    .select("settings, type")
-    .eq("id", contentItemId)
-    .maybeSingle()
+  const row = await queryOne<{ settings: Record<string, unknown>; type: string }>(
+    "select settings, type from public.content_items where id = $1",
+    [contentItemId]
+  )
 
   if (!row || !isExamLikeContentType(row.type)) return null
   const exam = parseExamFromSettings(row.settings as Record<string, unknown>)
@@ -525,12 +549,10 @@ export async function getMcqSolutionsForContentExercise(
 export async function getExamDefinitionForContentItem(
   contentItemId: string
 ): Promise<ActivityExamDefinition | null> {
-  const supabase = await createClient()
-  const { data: row } = await supabase
-    .from("content_items")
-    .select("settings, type")
-    .eq("id", contentItemId)
-    .maybeSingle()
+  const row = await queryOne<{ settings: Record<string, unknown>; type: string }>(
+    "select settings, type from public.content_items where id = $1",
+    [contentItemId]
+  )
 
   if (!row || !isExamLikeContentType(row.type)) return null
   return parseExamFromSettings(row.settings as Record<string, unknown>)

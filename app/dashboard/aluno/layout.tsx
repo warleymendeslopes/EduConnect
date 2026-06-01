@@ -3,8 +3,7 @@
 import { useState, useEffect } from "react"
 import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
-import { createClient } from "@/lib/supabase/client"
-import type { User as AuthUser } from "@supabase/supabase-js"
+import { signOut, useSession } from "next-auth/react"
 import { Button } from "@/components/ui/button"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { 
@@ -53,34 +52,20 @@ export default function AlunoLayout({
 }) {
   const pathname = usePathname()
   const router = useRouter()
+  const { status } = useSession()
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [user, setUser] = useState<AuthUser | null>(null)
   const [profile, setProfile] = useState<{ full_name: string; avatar_url: string | null } | null>(null)
 
   useEffect(() => {
-    const supabase = createClient()
-    
-    const getUser = async () => {
-      const { data: { user } } = await supabase.auth.getUser()
-      setUser(user)
-      
-      if (user) {
-        const { data: profileData } = await supabase
-          .from("profiles")
-          .select("full_name, avatar_url")
-          .eq("id", user.id)
-          .single()
-        
-        setProfile(profileData)
-      }
-    }
-    
-    getUser()
-  }, [])
+    if (status !== "authenticated") return
+    fetch("/api/me")
+      .then((r) => r.json())
+      .then((d) => setProfile(d?.profile ?? null))
+      .catch(() => setProfile(null))
+  }, [status])
 
   const handleLogout = async () => {
-    const supabase = createClient()
-    await supabase.auth.signOut()
+    await signOut({ redirect: false })
     router.push("/login")
     router.refresh()
   }

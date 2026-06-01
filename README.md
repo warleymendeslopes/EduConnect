@@ -62,7 +62,8 @@ Com base na pontuacao, o artigo pode ser publicado automaticamente, enviado para
 - Next.js 16 com App Router.
 - React 19.
 - TypeScript.
-- Supabase para autenticacao, banco de dados e RLS.
+- Postgres (conexao direta via `pg`).
+- NextAuth (Credentials) para autenticacao.
 - Vercel Blob para arquivos e anexos.
 - xAI para revisao automatica de conteudo.
 - Tailwind CSS 4.
@@ -93,21 +94,17 @@ lib/
   activities/                      Tipos e logica de atividades/provas
   classrooms/                      Tipos e utilitarios de turmas
   content/                         Tipos, configuracoes e agente de revisao
-  supabase/                        Clientes Supabase client/server/middleware
   student-planner/                 Utilitarios do plano de estudos
 
 scripts/
   001_*.sql ... 014_*.sql          Scripts SQL para preparar o banco
-
-supabase/
-  migrations/                      Migracoes do Supabase
 ```
 
 ## Requisitos
 
 - Node.js compativel com Next.js 16.
 - npm.
-- Projeto Supabase configurado.
+- Banco Postgres acessivel via `DATABASE_URL`.
 - Bucket/credenciais do Vercel Blob para uploads.
 - Chave da xAI para revisao automatica de artigos.
 
@@ -122,42 +119,27 @@ npm install
 2. Configure as variaveis de ambiente em `.env.local` ou `.env.development.local`:
 
 ```bash
-NEXT_PUBLIC_SUPABASE_URL=
-NEXT_PUBLIC_SUPABASE_ANON_KEY=
-SUPABASE_SERVICE_ROLE_KEY=
+DATABASE_URL=
+AUTH_SECRET=
+AUTH_TRUST_HOST=true
 BLOB_READ_WRITE_TOKEN=
 XAI_API_KEY=
 NEXT_PUBLIC_APP_URL=
-NEXT_PUBLIC_DEV_SUPABASE_REDIRECT_URL=
 ```
 
 Variaveis principais:
 
-- `NEXT_PUBLIC_SUPABASE_URL`: URL publica do projeto Supabase.
-- `NEXT_PUBLIC_SUPABASE_ANON_KEY`: chave anonima publica do Supabase.
-- `SUPABASE_SERVICE_ROLE_KEY`: chave de service role usada em fluxos server-side.
+- `DATABASE_URL`: string de conexao do Postgres.
+- `AUTH_SECRET`: segredo do NextAuth.
+- `AUTH_TRUST_HOST`: use `true` em desenvolvimento.
 - `BLOB_READ_WRITE_TOKEN`: token do Vercel Blob para upload e leitura de arquivos.
 - `XAI_API_KEY`: chave usada pelo agente de revisao de artigos.
 - `NEXT_PUBLIC_APP_URL`: URL base da aplicacao para gerar links absolutos.
-- `NEXT_PUBLIC_DEV_SUPABASE_REDIRECT_URL`: URL opcional para redirect em desenvolvimento.
 
-3. Prepare o banco no Supabase executando os scripts SQL em ordem:
+3. Prepare o banco no Postgres executando:
 
-```text
-scripts/001_create_profiles.sql
-scripts/002_classrooms.sql
-scripts/003_classroom_activities.sql
-scripts/004_classroom_materials.sql
-scripts/005_classroom_activity_submissions.sql
-scripts/006_classroom_mural_cover.sql
-scripts/007_classroom_performance_stats.sql
-scripts/008_student_planner_personal_tasks.sql
-scripts/009_content_items.sql
-scripts/010_content_exercises.sql
-scripts/011_content_assessments.sql
-scripts/012_content_simulados.sql
-scripts/013_content_dicas.sql
-scripts/014_content_review.sql
+```bash
+node scripts/apply-sql.mjs scripts/100_bootstrap_postgres.sql scripts/200_app_schema_postgres.sql
 ```
 
 4. Rode o servidor de desenvolvimento:
@@ -182,6 +164,40 @@ npm run lint     # executa o lint configurado no package.json
 ```
 
 Observacao: o script de lint usa `eslint .`. Se o comando falhar com `eslint: command not found`, instale/configure o ESLint no projeto antes de usar essa validacao.
+
+## GitHub Project e demandas
+
+O repositorio possui um utilitario para ler o GitHub Project
+`https://github.com/users/warleymendeslopes/projects/3` e criar demandas nos
+status `Backlog` ou `Ready`.
+
+Crie um arquivo `.env.github.local` com um token do GitHub:
+
+```bash
+GITHUB_TOKEN=github_pat_seu_token
+GITHUB_PROJECT_OWNER=warleymendeslopes
+GITHUB_PROJECT_OWNER_TYPE=user
+GITHUB_PROJECT_NUMBER=3
+GITHUB_REPO=warleymendeslopes/EduConnect
+```
+
+Para Project de usuario, use um personal access token classic com os scopes
+`project` e `repo` se o repositorio for privado, ou `project` e `public_repo`
+se ele for publico.
+Depois, use:
+
+```bash
+npm run github:project -- info
+npm run backlog:add -- --title "Criar painel do professor" --body "Detalhes da demanda"
+npm run ready:add -- --title "Ajustar login do aluno" --body "Detalhes da demanda"
+```
+
+Por padrao, o utilitario cria uma issue no repositorio e adiciona a issue ao
+Project. Para criar apenas um draft item dentro do Project, use:
+
+```bash
+npm run github:project -- backlog --draft --title "Ideia para priorizar"
+```
 
 ## Fluxos importantes
 
@@ -210,7 +226,7 @@ Observacao: o script de lint usa `eslint .`. Se o comando falhar com `eslint: co
 
 ## Banco de dados e seguranca
 
-O projeto usa Supabase com RLS habilitado nas principais tabelas. Os scripts SQL criam tabelas, politicas, funcoes e triggers para:
+O projeto usa Postgres direto. Os scripts SQL criam tabelas, funcoes e triggers para:
 
 - perfis de usuario;
 - turmas e membros;
@@ -241,12 +257,11 @@ Alguns pontos ainda podem evoluir:
 
 O projeto e adequado para deploy na Vercel. Antes de publicar, configure no ambiente de producao:
 
-- variaveis do Supabase;
-- chave service role do Supabase;
+- `DATABASE_URL` do Postgres;
+- `AUTH_SECRET` do NextAuth;
 - token do Vercel Blob;
 - chave da xAI;
 - URL publica da aplicacao;
-- redirects de autenticacao no painel do Supabase.
 
 ## Repositorio
 

@@ -1,0 +1,91 @@
+import { NextResponse } from "next/server"
+import { z } from "zod"
+import bcrypt from "bcryptjs"
+import { dbPool } from "@/lib/db/pool"
+
+export const runtime = "nodejs"
+
+const schema = z.object({
+  email: z.string().email(),
+  password: z.string().min(6),
+  fullName: z.string().min(1).max(200),
+  userType: z.enum(["aluno", "professor"]),
+  interests: z.array(z.string()).optional().default([]),
+})
+
+export async function POST(request: Request) {
+  let body: unknown
+  try {
+    body = await request.json()
+  } catch {
+    return NextResponse.json({ ok: false, error: "Corpo invalido" }, { status: 400 })
+  }
+
+  const parsed = schema.safeParse(body)
+  if (!parsed.success) {
+    return NextResponse.json({ ok: false, error: "Dados invalidos" }, { status: 400 })
+  }
+
+  const { email, password, fullName, userType, interests } = parsed.data
+  const normalizedEmail = email.toLowerCase().trim()
+  const passwordHash = await bcrypt.hash(password, 12)
+
+  const pool = dbPool()
+  const client = await pool.connect()
+  try {
+    await client.query("begin")
+
+    const userRes = await client.query<{ id: string }>(
+      "insert into public.users (email, password_hash) values ($1, $2) returning id",
+      [normalizedEmail, passwordHash]
+    )
+    const userId = userRes.rows[0]?.id
+    if (!userId) throw new Error("Falha ao criar usuario")
+
+    await client.query(
+      "insert into public.profiles (id, full_name, user_type, interests) values ($1, $2, $3, $4)",
+      [userId, fullName, userType, interests]
+    )
+
+    await client.query("commit")
+    return NextResponse.json({ ok: true })
+  } catch (e: any) {
+    await client.query("rollback").catch(() => {})
+    const msg = String(e?.message || "")
+
+    // Helpful diagnostics during development; avoid leaking internals in production.
+    if (process.env.NODE_ENV !== "production") {
+      console.error("/api/auth/signup failed:", e)
+    }
+
+    if (msg.toLowerCase().includes("unique") || msg.toLowerCase().includes("duplicate")) {
+      return NextResponse.json({ ok: false, error: "Este e-mail ja esta cadastrado" }, { status: 409 })
+    }
+
+    // Common local setup issues.
+    if (msg.toLowerCase().includes("connect") || msg.toLowerCase().includes("econn") || msg.toLowerCase().includes("timeout")) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "Falha ao conectar no banco de dados",
+          detail: process.env.NODE_ENV !== "production" ? msg : undefined,
+        },
+        { status: 500 }
+      )
+    }
+    if (msg.toLowerCase().includes("does not exist") || msg.toLowerCase().includes("relation")) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "Banco de dados nao inicializado (tabelas ausentes)",
+          detail: process.env.NODE_ENV !== "production" ? msg : undefined,
+        },
+        { status: 500 }
+      )
+    }
+
+    return NextResponse.json({ ok: false, error: "Erro ao criar conta" }, { status: 500 })
+  } finally {
+    client.release()
+  }
+}

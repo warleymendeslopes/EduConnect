@@ -75,7 +75,7 @@ export function AlunoPerformancePanel({
       <p className="text-xs text-gray-500">
         Comparacao com a turma usa medias agregadas (sem mostrar notas de
         colegas). Aplica o script SQL <code className="text-[11px]">007</code>{" "}
-        no Supabase para ativar medias da turma.
+        no Postgres para ativar medias da turma.
       </p>
 
       <div className="grid gap-4 sm:grid-cols-3">
@@ -119,7 +119,14 @@ export function AlunoPerformancePanel({
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={lineData} margin={{ bottom: 8 }}>
                 <CartesianGrid strokeDasharray="3 3" className="stroke-gray-100" />
-                <XAxis dataKey="label" tick={{ fontSize: 10 }} interval={0} angle={-15} textAnchor="end" height={56} />
+                <XAxis
+                  dataKey="label"
+                  tick={{ fontSize: 10 }}
+                  interval={0}
+                  angle={-15}
+                  textAnchor="end"
+                  height={56}
+                />
                 <YAxis tick={{ fontSize: 11 }} />
                 <Tooltip formatter={(v: number) => [fmtNum(v), "Nota"]} />
                 <Line
@@ -210,3 +217,4 @@ function ComparisonBadge({
   }
   return <span className="text-gray-400 text-xs">—</span>
 }
+

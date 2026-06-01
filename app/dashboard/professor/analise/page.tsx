@@ -1,21 +1,18 @@
 import { listMyReviewedContent } from "@/app/actions/content-review"
 import { ProfessorAnaliseClient } from "@/components/dashboard/professor-analise-client"
-import { createClient } from "@/lib/supabase/server"
+import { requireAuthedUser } from "@/lib/auth/user"
+import { queryOne } from "@/lib/db/query"
 import { Bot } from "lucide-react"
 import { redirect } from "next/navigation"
 
 export default async function ProfessorAnalisePage() {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) redirect("/login")
 
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("user_type")
-    .eq("id", user.id)
-    .maybeSingle()
+  const profile = await queryOne<{ user_type: string }>(
+    "select user_type from public.profiles where id = $1",
+    [user.id]
+  )
 
   if (profile?.user_type !== "professor") redirect("/dashboard/aluno")
 

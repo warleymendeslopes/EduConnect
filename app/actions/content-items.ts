@@ -4,7 +4,8 @@ import { put } from "@vercel/blob"
 import { randomUUID } from "crypto"
 import { revalidatePath } from "next/cache"
 import { after } from "next/server"
-import { createClient } from "@/lib/supabase/server"
+import { requireAuthedUser } from "@/lib/auth/user"
+import { query, queryOne } from "@/lib/db/query"
 import { runArticleReview } from "@/lib/content/review-agent"
 import {
   effectiveContentType,
@@ -31,6 +32,40 @@ import {
 const TRIX_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 /** Capa em video (MP4/WebM/MOV) */
 const COVER_VIDEO_MAX_BYTES = 80 * 1024 * 1024
+
+function asRecord(v: unknown): Record<string, unknown> {
+  if (!v) return {}
+  if (typeof v === "object") return v as Record<string, unknown>
+  if (typeof v === "string") {
+    try {
+      const parsed = JSON.parse(v)
+      return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {}
+    } catch {
+      return {}
+    }
+  }
+  return {}
+}
+
+async function assertOwnsAllClassrooms(professorId: string, classroomIds: string[]): Promise<boolean> {
+  const ids = classroomIds.filter((x) => typeof x === "string" && x.trim().length > 0)
+  if (ids.length === 0) return false
+  const rows = await query<{ id: string }>(
+    "select id from public.classrooms where professor_id = $1 and id = any($2::uuid[])",
+    [professorId, ids]
+  )
+  return rows.length === ids.length
+}
+
+async function replaceContentItemClassrooms(contentItemId: string, classroomIds: string[] | undefined) {
+  await query("delete from public.content_item_classrooms where content_item_id = $1", [contentItemId])
+  const ids = (classroomIds ?? []).filter((x) => typeof x === "string" && x.trim().length > 0)
+  if (ids.length === 0) return
+  await query(
+    "insert into public.content_item_classrooms (content_item_id, classroom_id) select $1, unnest($2::uuid[])",
+    [contentItemId, ids]
+  )
+}
 
 function validateDicaMediaForPublish(settings: ContentItemSettings): string | null {
   const v = settings.dicaVideoUrl?.trim() || null
@@ -62,34 +97,28 @@ function isArticleCoverVideoFile(file: File): boolean {
   return false
 }
 
-async function assertProfessor(supabase: Awaited<ReturnType<typeof createClient>>) {
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+async function assertProfessor() {
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { user: null as null, error: "Nao autenticado" as const }
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("user_type")
-    .eq("id", user.id)
-    .single()
+  const profile = await queryOne<{ user_type: string }>(
+    "select user_type from public.profiles where id = $1",
+    [user.id]
+  )
   if (profile?.user_type !== "professor") {
-    return { user: null, error: "Apenas professores" as const }
+    return { user: null as null, error: "Apenas professores" as const }
   }
-  return { user, error: null as null }
+  return { user: { id: user.id }, error: null as null }
 }
 
 async function assertOwnsArticle(
-  supabase: Awaited<ReturnType<typeof createClient>>,
   articleId: string,
   userId: string
 ): Promise<boolean> {
-  const { data } = await supabase
-    .from("content_items")
-    .select("id")
-    .eq("id", articleId)
-    .eq("author_id", userId)
-    .maybeSingle()
-  return !!data
+  const row = await queryOne<{ id: string }>(
+    "select id from public.content_items where id = $1 and author_id = $2",
+    [articleId, userId]
+  )
+  return !!row
 }
 
 export type ProfessorContentListItem = {
@@ -128,34 +157,38 @@ function plainTextExcerpt(html: string | null | undefined, max = 200): string {
 export async function listMyContentItemsForProfessor(): Promise<
   ProfessorContentListItem[]
 > {
-  const supabase = await createClient()
-  const p = await assertProfessor(supabase)
+  const p = await assertProfessor()
   if (!p.user) return []
 
-  const { data, error } = await supabase
-    .from("content_items")
-    .select(
-      "id, type, title, body_html, status, visibility, published_at, like_count, share_count, updated_at, settings, content_review_results(score, seal)"
+  let data: any[] = []
+  try {
+    data = await query<any>(
+      `select
+        ci.id, ci.type, ci.title, ci.body_html, ci.status, ci.visibility,
+        ci.published_at, ci.like_count, ci.share_count, ci.updated_at, ci.settings,
+        crr.score as review_score, crr.seal as review_seal
+       from public.content_items ci
+       left join public.content_review_results crr on crr.content_item_id = ci.id
+       where ci.author_id = $1
+         and ci.type = any($2::text[])
+       order by ci.updated_at desc`,
+      [p.user.id, ["article", "exercise", "assessment", "simulado", "dica"]]
     )
-    .eq("author_id", p.user.id)
-    .in("type", ["article", "exercise", "assessment", "simulado", "dica"])
-    .order("updated_at", { ascending: false })
-
-  if (error) return []
+  } catch {
+    return []
+  }
 
   type RowWithReview = {
     id: string; type: string; title: string; body_html: string | null
     status: string; visibility: string; published_at: string | null
     like_count: number; share_count: number; updated_at: string
     settings: Record<string, unknown>
-    content_review_results: Array<{ score: number; seal: string }> | null
+    review_score: number | null
+    review_seal: string | null
   }
 
   return ((data ?? []) as RowWithReview[]).map((row) => {
-    const reviewArr = Array.isArray(row.content_review_results)
-      ? row.content_review_results
-      : []
-    const reviewData = reviewArr[0] ?? null
+    const reviewData = row.review_seal ? { seal: row.review_seal, score: row.review_score } : null
     const settings = (row.settings ?? {}) as ContentItemSettings
     const exam = parseExamFromSettings(settings as Record<string, unknown>)
     const qCount = exam?.questions.length ?? null
@@ -218,83 +251,119 @@ export async function listMyContentItemsForProfessor(): Promise<
 export async function listMyClassroomsForArticle(): Promise<
   { id: string; name: string; subject: string }[]
 > {
-  const supabase = await createClient()
-  const p = await assertProfessor(supabase)
+  const p = await assertProfessor()
   if (!p.user) return []
 
-  const { data } = await supabase
-    .from("classrooms")
-    .select("id, name, subject")
-    .eq("professor_id", p.user.id)
-    .eq("status", "ativa")
-    .order("name")
-
-  return (data ?? []).map((r) => ({
-    id: r.id,
-    name: r.name,
-    subject: r.subject,
-  }))
+  try {
+    const rows = await query<{ id: string; name: string; subject: string }>(
+      "select id, name, subject from public.classrooms where professor_id = $1 and status = 'ativa' order by name asc",
+      [p.user.id]
+    )
+    return rows.map((r) => ({ id: r.id, name: r.name, subject: r.subject }))
+  } catch {
+    return []
+  }
 }
 
-/** Rascunho vazio para obter id antes de uploads Trix no artigo. Usa RPC no Supabase para evitar bloqueio de RLS no INSERT direto. */
+/** Rascunho vazio para obter id antes de uploads Trix no artigo. */
 export async function createArticleDraft(): Promise<
   { ok: true; id: string } | { ok: false; error: string }
 > {
-  const supabase = await createClient()
-  const { data: id, error } = await supabase.rpc("create_article_draft")
-  if (error) {
-    return { ok: false, error: error.message ?? "Erro ao criar rascunho" }
+  const p = await assertProfessor()
+  if (!p.user) return { ok: false, error: p.error ?? "Nao autenticado" }
+  try {
+    const row = await queryOne<{ id: string }>(
+      `insert into public.content_items
+        (author_id, type, title, body_html, status, visibility, settings, created_at, updated_at)
+       values ($1, 'article', 'Rascunho', null, 'draft', 'private', '{}'::jsonb, timezone('utc'::text, now()), timezone('utc'::text, now()))
+       returning id`,
+      [p.user.id]
+    )
+    if (!row?.id) return { ok: false, error: "Erro ao criar rascunho" }
+    return { ok: true, id: row.id }
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao criar rascunho" }
   }
-  if (id == null) return { ok: false, error: "Erro ao criar rascunho" }
-  return { ok: true, id: String(id) }
 }
 
 export async function createExerciseDraft(): Promise<
   { ok: true; id: string } | { ok: false; error: string }
 > {
-  const supabase = await createClient()
-  const { data: id, error } = await supabase.rpc("create_exercise_draft")
-  if (error) {
-    return { ok: false, error: error.message ?? "Erro ao criar rascunho" }
+  const p = await assertProfessor()
+  if (!p.user) return { ok: false, error: p.error ?? "Nao autenticado" }
+  try {
+    const row = await queryOne<{ id: string }>(
+      `insert into public.content_items
+        (author_id, type, title, body_html, status, visibility, settings, created_at, updated_at)
+       values ($1, 'exercise', 'Rascunho (exercicio)', null, 'draft', 'private', '{}'::jsonb, timezone('utc'::text, now()), timezone('utc'::text, now()))
+       returning id`,
+      [p.user.id]
+    )
+    if (!row?.id) return { ok: false, error: "Erro ao criar rascunho" }
+    return { ok: true, id: row.id }
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao criar rascunho" }
   }
-  if (id == null) return { ok: false, error: "Erro ao criar rascunho" }
-  return { ok: true, id: String(id) }
 }
 
 export async function createAssessmentDraft(): Promise<
   { ok: true; id: string } | { ok: false; error: string }
 > {
-  const supabase = await createClient()
-  const { data: id, error } = await supabase.rpc("create_assessment_draft")
-  if (error) {
-    return { ok: false, error: error.message ?? "Erro ao criar rascunho" }
+  const p = await assertProfessor()
+  if (!p.user) return { ok: false, error: p.error ?? "Nao autenticado" }
+  try {
+    const row = await queryOne<{ id: string }>(
+      `insert into public.content_items
+        (author_id, type, title, body_html, status, visibility, settings, created_at, updated_at)
+       values ($1, 'assessment', 'Rascunho (avaliacao)', null, 'draft', 'private', '{}'::jsonb, timezone('utc'::text, now()), timezone('utc'::text, now()))
+       returning id`,
+      [p.user.id]
+    )
+    if (!row?.id) return { ok: false, error: "Erro ao criar rascunho" }
+    return { ok: true, id: row.id }
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao criar rascunho" }
   }
-  if (id == null) return { ok: false, error: "Erro ao criar rascunho" }
-  return { ok: true, id: String(id) }
 }
 
 export async function createSimuladoDraft(): Promise<
   { ok: true; id: string } | { ok: false; error: string }
 > {
-  const supabase = await createClient()
-  const { data: id, error } = await supabase.rpc("create_simulado_draft")
-  if (error) {
-    return { ok: false, error: error.message ?? "Erro ao criar rascunho" }
+  const p = await assertProfessor()
+  if (!p.user) return { ok: false, error: p.error ?? "Nao autenticado" }
+  try {
+    const row = await queryOne<{ id: string }>(
+      `insert into public.content_items
+        (author_id, type, title, body_html, status, visibility, settings, created_at, updated_at)
+       values ($1, 'simulado', 'Rascunho (simulado)', null, 'draft', 'private', '{}'::jsonb, timezone('utc'::text, now()), timezone('utc'::text, now()))
+       returning id`,
+      [p.user.id]
+    )
+    if (!row?.id) return { ok: false, error: "Erro ao criar rascunho" }
+    return { ok: true, id: row.id }
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao criar rascunho" }
   }
-  if (id == null) return { ok: false, error: "Erro ao criar rascunho" }
-  return { ok: true, id: String(id) }
 }
 
 export async function createDicaDraft(): Promise<
   { ok: true; id: string } | { ok: false; error: string }
 > {
-  const supabase = await createClient()
-  const { data: id, error } = await supabase.rpc("create_dica_draft")
-  if (error) {
-    return { ok: false, error: error.message ?? "Erro ao criar rascunho" }
+  const p = await assertProfessor()
+  if (!p.user) return { ok: false, error: p.error ?? "Nao autenticado" }
+  try {
+    const row = await queryOne<{ id: string }>(
+      `insert into public.content_items
+        (author_id, type, title, body_html, status, visibility, settings, created_at, updated_at)
+       values ($1, 'dica', 'Rascunho (dica)', null, 'draft', 'private', '{}'::jsonb, timezone('utc'::text, now()), timezone('utc'::text, now()))
+       returning id`,
+      [p.user.id]
+    )
+    if (!row?.id) return { ok: false, error: "Erro ao criar rascunho" }
+    return { ok: true, id: row.id }
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao criar rascunho" }
   }
-  if (id == null) return { ok: false, error: "Erro ao criar rascunho" }
-  return { ok: true, id: String(id) }
 }
 
 export type SaveExerciseDraftInput = {
@@ -309,21 +378,16 @@ export type SaveExerciseDraftInput = {
 export async function saveExerciseDraft(
   input: SaveExerciseDraftInput
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const p = await assertProfessor(supabase)
+  const p = await assertProfessor()
   if (!p.user) return { ok: false, error: p.error ?? "Nao autenticado" }
 
-  const { data: row, error: fetchErr } = await supabase
-    .from("content_items")
-    .select("id, settings, type")
-    .eq("id", input.id)
-    .eq("author_id", p.user.id)
-    .eq("type", "exercise")
-    .maybeSingle()
+  const row = await queryOne<{ id: string; settings: any; type: string }>(
+    "select id, settings, type from public.content_items where id = $1 and author_id = $2 and type = 'exercise'",
+    [input.id, p.user.id]
+  )
+  if (!row) return { ok: false, error: "Exercicio nao encontrado" }
 
-  if (fetchErr || !row) return { ok: false, error: "Exercicio nao encontrado" }
-
-  const current = (row.settings ?? {}) as Record<string, unknown>
+  const current = asRecord(row.settings)
   const baseSettings: ContentItemSettings = {
     tags: input.settings.tags?.filter(Boolean) ?? [],
     disciplina: input.settings.disciplina?.trim() || undefined,
@@ -351,14 +415,22 @@ export async function saveExerciseDraft(
     patch.body_html = sanitizeActivityHtml(input.bodyHtml.trim() || "") || null
   }
 
-  const { error: upErr } = await supabase
-    .from("content_items")
-    .update(patch)
-    .eq("id", input.id)
-    .eq("author_id", p.user.id)
-    .eq("type", "exercise")
-
-  if (upErr) return { ok: false, error: upErr.message }
+  try {
+    await query(
+      "update public.content_items set title = coalesce($1, title), body_html = coalesce($2, body_html), settings = $3::jsonb where id = $4 and author_id = $5 and type = 'exercise'",
+      [
+        input.title !== undefined ? input.title.trim() : null,
+        input.bodyHtml !== undefined
+          ? sanitizeActivityHtml(input.bodyHtml.trim() || "") || null
+          : null,
+        JSON.stringify(merged),
+        input.id,
+        p.user.id,
+      ]
+    )
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao salvar rascunho" }
+  }
   revalidatePath("/dashboard/professor/criar")
   revalidatePath("/dashboard/professor/conteudos")
   revalidatePath(`/conteudo/${input.id}`)
@@ -373,21 +445,16 @@ export type SaveAssessmentDraftInput = SaveExerciseDraftInput & {
 export async function saveAssessmentDraft(
   input: SaveAssessmentDraftInput
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const p = await assertProfessor(supabase)
+  const p = await assertProfessor()
   if (!p.user) return { ok: false, error: p.error ?? "Nao autenticado" }
 
-  const { data: row, error: fetchErr } = await supabase
-    .from("content_items")
-    .select("id, settings, type")
-    .eq("id", input.id)
-    .eq("author_id", p.user.id)
-    .eq("type", "assessment")
-    .maybeSingle()
+  const row = await queryOne<{ id: string; settings: any; type: string }>(
+    "select id, settings, type from public.content_items where id = $1 and author_id = $2 and type = 'assessment'",
+    [input.id, p.user.id]
+  )
+  if (!row) return { ok: false, error: "Avaliacao nao encontrada" }
 
-  if (fetchErr || !row) return { ok: false, error: "Avaliacao nao encontrada" }
-
-  const current = (row.settings ?? {}) as Record<string, unknown>
+  const current = asRecord(row.settings)
   const baseSettings: ContentItemSettings = {
     tags: input.settings.tags?.filter(Boolean) ?? [],
     disciplina: input.settings.disciplina?.trim() || undefined,
@@ -417,14 +484,22 @@ export async function saveAssessmentDraft(
     patch.body_html = sanitizeActivityHtml(input.bodyHtml.trim() || "") || null
   }
 
-  const { error: upErr } = await supabase
-    .from("content_items")
-    .update(patch)
-    .eq("id", input.id)
-    .eq("author_id", p.user.id)
-    .eq("type", "assessment")
-
-  if (upErr) return { ok: false, error: upErr.message }
+  try {
+    await query(
+      "update public.content_items set title = coalesce($1, title), body_html = coalesce($2, body_html), settings = $3::jsonb where id = $4 and author_id = $5 and type = 'assessment'",
+      [
+        input.title !== undefined ? input.title.trim() : null,
+        input.bodyHtml !== undefined
+          ? sanitizeActivityHtml(input.bodyHtml.trim() || "") || null
+          : null,
+        JSON.stringify(merged),
+        input.id,
+        p.user.id,
+      ]
+    )
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao salvar rascunho" }
+  }
   revalidatePath("/dashboard/professor/criar")
   revalidatePath("/dashboard/professor/conteudos")
   revalidatePath(`/conteudo/${input.id}`)
@@ -434,21 +509,16 @@ export async function saveAssessmentDraft(
 export async function saveSimuladoDraft(
   input: SaveAssessmentDraftInput
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const p = await assertProfessor(supabase)
+  const p = await assertProfessor()
   if (!p.user) return { ok: false, error: p.error ?? "Nao autenticado" }
 
-  const { data: row, error: fetchErr } = await supabase
-    .from("content_items")
-    .select("id, settings, type")
-    .eq("id", input.id)
-    .eq("author_id", p.user.id)
-    .eq("type", "simulado")
-    .maybeSingle()
+  const row = await queryOne<{ id: string; settings: any; type: string }>(
+    "select id, settings, type from public.content_items where id = $1 and author_id = $2 and type = 'simulado'",
+    [input.id, p.user.id]
+  )
+  if (!row) return { ok: false, error: "Simulado nao encontrado" }
 
-  if (fetchErr || !row) return { ok: false, error: "Simulado nao encontrado" }
-
-  const current = (row.settings ?? {}) as Record<string, unknown>
+  const current = asRecord(row.settings)
   const baseSettings: ContentItemSettings = {
     tags: input.settings.tags?.filter(Boolean) ?? [],
     disciplina: input.settings.disciplina?.trim() || undefined,
@@ -478,14 +548,22 @@ export async function saveSimuladoDraft(
     patch.body_html = sanitizeActivityHtml(input.bodyHtml.trim() || "") || null
   }
 
-  const { error: upErr } = await supabase
-    .from("content_items")
-    .update(patch)
-    .eq("id", input.id)
-    .eq("author_id", p.user.id)
-    .eq("type", "simulado")
-
-  if (upErr) return { ok: false, error: upErr.message }
+  try {
+    await query(
+      "update public.content_items set title = coalesce($1, title), body_html = coalesce($2, body_html), settings = $3::jsonb where id = $4 and author_id = $5 and type = 'simulado'",
+      [
+        input.title !== undefined ? input.title.trim() : null,
+        input.bodyHtml !== undefined
+          ? sanitizeActivityHtml(input.bodyHtml.trim() || "") || null
+          : null,
+        JSON.stringify(merged),
+        input.id,
+        p.user.id,
+      ]
+    )
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao salvar rascunho" }
+  }
   revalidatePath("/dashboard/professor/criar")
   revalidatePath("/dashboard/professor/conteudos")
   revalidatePath(`/conteudo/${input.id}`)
@@ -504,19 +582,14 @@ export type PublishExerciseInput = {
 export async function publishExercise(
   input: PublishExerciseInput
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const p = await assertProfessor(supabase)
+  const p = await assertProfessor()
   if (!p.user) return { ok: false, error: p.error ?? "Nao autenticado" }
 
-  const { data: existingRow, error: exErr } = await supabase
-    .from("content_items")
-    .select("published_at, status, settings, type")
-    .eq("id", input.id)
-    .eq("author_id", p.user.id)
-    .eq("type", "exercise")
-    .maybeSingle()
-
-  if (exErr || !existingRow) return { ok: false, error: "Exercicio nao encontrado" }
+  const existingRow = await queryOne<{ published_at: string | null; status: string; settings: any }>(
+    "select published_at, status, settings from public.content_items where id = $1 and author_id = $2 and type = 'exercise'",
+    [input.id, p.user.id]
+  )
+  if (!existingRow) return { ok: false, error: "Exercicio nao encontrado" }
 
   const title = input.title.trim()
   if (!title) return { ok: false, error: "Titulo obrigatorio" }
@@ -526,17 +599,8 @@ export async function publishExercise(
     if (ids.length === 0) {
       return { ok: false, error: "Selecione ao menos uma turma" }
     }
-    for (const cid of ids) {
-      const owns = await supabase
-        .from("classrooms")
-        .select("id")
-        .eq("id", cid)
-        .eq("professor_id", p.user.id)
-        .maybeSingle()
-      if (!owns.data) {
-        return { ok: false, error: "Turma invalida" }
-      }
-    }
+    const ok = await assertOwnsAllClassrooms(p.user.id, ids).catch(() => false)
+    if (!ok) return { ok: false, error: "Turma invalida" }
   }
 
   const bodyHtml = sanitizeActivityHtml(input.bodyHtml.trim() || "")
@@ -565,31 +629,16 @@ export async function publishExercise(
       ? existingRow.published_at
       : new Date().toISOString()
 
-  const { error: upErr } = await supabase
-    .from("content_items")
-    .update({
-      title,
-      body_html: bodyHtml || null,
-      status: "published",
-      visibility: input.visibility,
-      published_at: publishedAt,
-      settings: settings as Record<string, unknown>,
-    })
-    .eq("id", input.id)
-    .eq("author_id", p.user.id)
-    .eq("type", "exercise")
-
-  if (upErr) return { ok: false, error: upErr.message }
-
-  await supabase.from("content_item_classrooms").delete().eq("content_item_id", input.id)
-
-  if (input.visibility === "classrooms") {
-    const rows = (input.classroomIds ?? []).map((classroom_id) => ({
-      content_item_id: input.id,
-      classroom_id,
-    }))
-    const { error: jErr } = await supabase.from("content_item_classrooms").insert(rows)
-    if (jErr) return { ok: false, error: jErr.message }
+  try {
+    await query(
+      `update public.content_items
+       set title = $1, body_html = $2, status = 'published', visibility = $3, published_at = $4, settings = $5::jsonb
+       where id = $6 and author_id = $7 and type = 'exercise'`,
+      [title, bodyHtml || null, input.visibility, publishedAt, JSON.stringify(settings), input.id, p.user.id]
+    )
+    await replaceContentItemClassrooms(input.id, input.visibility === "classrooms" ? input.classroomIds : [])
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao publicar exercicio" }
   }
 
   revalidatePath("/dashboard/aluno")
@@ -607,19 +656,14 @@ export type PublishAssessmentInput = PublishExerciseInput & {
 export async function publishAssessment(
   input: PublishAssessmentInput
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const p = await assertProfessor(supabase)
+  const p = await assertProfessor()
   if (!p.user) return { ok: false, error: p.error ?? "Nao autenticado" }
 
-  const { data: existingRow, error: exErr } = await supabase
-    .from("content_items")
-    .select("published_at, status, settings, type")
-    .eq("id", input.id)
-    .eq("author_id", p.user.id)
-    .eq("type", "assessment")
-    .maybeSingle()
-
-  if (exErr || !existingRow) return { ok: false, error: "Avaliacao nao encontrada" }
+  const existingRow = await queryOne<{ published_at: string | null; status: string; settings: any }>(
+    "select published_at, status, settings from public.content_items where id = $1 and author_id = $2 and type = 'assessment'",
+    [input.id, p.user.id]
+  )
+  if (!existingRow) return { ok: false, error: "Avaliacao nao encontrada" }
 
   const title = input.title.trim()
   if (!title) return { ok: false, error: "Titulo obrigatorio" }
@@ -650,17 +694,8 @@ export async function publishAssessment(
     if (ids.length === 0) {
       return { ok: false, error: "Selecione ao menos uma turma" }
     }
-    for (const cid of ids) {
-      const owns = await supabase
-        .from("classrooms")
-        .select("id")
-        .eq("id", cid)
-        .eq("professor_id", p.user.id)
-        .maybeSingle()
-      if (!owns.data) {
-        return { ok: false, error: "Turma invalida" }
-      }
-    }
+    const ok = await assertOwnsAllClassrooms(p.user.id, ids).catch(() => false)
+    if (!ok) return { ok: false, error: "Turma invalida" }
   }
 
   const bodyHtml = sanitizeActivityHtml(input.bodyHtml.trim() || "")
@@ -693,31 +728,16 @@ export async function publishAssessment(
       ? existingRow.published_at
       : new Date().toISOString()
 
-  const { error: upErr } = await supabase
-    .from("content_items")
-    .update({
-      title,
-      body_html: bodyHtml || null,
-      status: "published",
-      visibility: input.visibility,
-      published_at: publishedAt,
-      settings: settings as Record<string, unknown>,
-    })
-    .eq("id", input.id)
-    .eq("author_id", p.user.id)
-    .eq("type", "assessment")
-
-  if (upErr) return { ok: false, error: upErr.message }
-
-  await supabase.from("content_item_classrooms").delete().eq("content_item_id", input.id)
-
-  if (input.visibility === "classrooms") {
-    const rows = (input.classroomIds ?? []).map((classroom_id) => ({
-      content_item_id: input.id,
-      classroom_id,
-    }))
-    const { error: jErr } = await supabase.from("content_item_classrooms").insert(rows)
-    if (jErr) return { ok: false, error: jErr.message }
+  try {
+    await query(
+      `update public.content_items
+       set title = $1, body_html = $2, status = 'published', visibility = $3, published_at = $4, settings = $5::jsonb
+       where id = $6 and author_id = $7 and type = 'assessment'`,
+      [title, bodyHtml || null, input.visibility, publishedAt, JSON.stringify(settings), input.id, p.user.id]
+    )
+    await replaceContentItemClassrooms(input.id, input.visibility === "classrooms" ? input.classroomIds : [])
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao publicar avaliacao" }
   }
 
   revalidatePath("/dashboard/aluno")
@@ -730,19 +750,14 @@ export async function publishAssessment(
 export async function publishSimulado(
   input: PublishAssessmentInput
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const p = await assertProfessor(supabase)
+  const p = await assertProfessor()
   if (!p.user) return { ok: false, error: p.error ?? "Nao autenticado" }
 
-  const { data: existingRow, error: exErr } = await supabase
-    .from("content_items")
-    .select("published_at, status, settings, type")
-    .eq("id", input.id)
-    .eq("author_id", p.user.id)
-    .eq("type", "simulado")
-    .maybeSingle()
-
-  if (exErr || !existingRow) return { ok: false, error: "Simulado nao encontrado" }
+  const existingRow = await queryOne<{ published_at: string | null; status: string; settings: any }>(
+    "select published_at, status, settings from public.content_items where id = $1 and author_id = $2 and type = 'simulado'",
+    [input.id, p.user.id]
+  )
+  if (!existingRow) return { ok: false, error: "Simulado nao encontrado" }
 
   const title = input.title.trim()
   if (!title) return { ok: false, error: "Titulo obrigatorio" }
@@ -773,17 +788,8 @@ export async function publishSimulado(
     if (ids.length === 0) {
       return { ok: false, error: "Selecione ao menos uma turma" }
     }
-    for (const cid of ids) {
-      const owns = await supabase
-        .from("classrooms")
-        .select("id")
-        .eq("id", cid)
-        .eq("professor_id", p.user.id)
-        .maybeSingle()
-      if (!owns.data) {
-        return { ok: false, error: "Turma invalida" }
-      }
-    }
+    const ok = await assertOwnsAllClassrooms(p.user.id, ids).catch(() => false)
+    if (!ok) return { ok: false, error: "Turma invalida" }
   }
 
   const bodyHtml = sanitizeActivityHtml(input.bodyHtml.trim() || "")
@@ -818,31 +824,16 @@ export async function publishSimulado(
       ? existingRow.published_at
       : new Date().toISOString()
 
-  const { error: upErr } = await supabase
-    .from("content_items")
-    .update({
-      title,
-      body_html: bodyHtml || null,
-      status: "published",
-      visibility: input.visibility,
-      published_at: publishedAt,
-      settings: settings as Record<string, unknown>,
-    })
-    .eq("id", input.id)
-    .eq("author_id", p.user.id)
-    .eq("type", "simulado")
-
-  if (upErr) return { ok: false, error: upErr.message }
-
-  await supabase.from("content_item_classrooms").delete().eq("content_item_id", input.id)
-
-  if (input.visibility === "classrooms") {
-    const rows = (input.classroomIds ?? []).map((classroom_id) => ({
-      content_item_id: input.id,
-      classroom_id,
-    }))
-    const { error: jErr } = await supabase.from("content_item_classrooms").insert(rows)
-    if (jErr) return { ok: false, error: jErr.message }
+  try {
+    await query(
+      `update public.content_items
+       set title = $1, body_html = $2, status = 'published', visibility = $3, published_at = $4, settings = $5::jsonb
+       where id = $6 and author_id = $7 and type = 'simulado'`,
+      [title, bodyHtml || null, input.visibility, publishedAt, JSON.stringify(settings), input.id, p.user.id]
+    )
+    await replaceContentItemClassrooms(input.id, input.visibility === "classrooms" ? input.classroomIds : [])
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao publicar simulado" }
   }
 
   revalidatePath("/dashboard/aluno")
@@ -855,36 +846,31 @@ export async function publishSimulado(
 export async function closeContentAssessment(
   contentItemId: string
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const p = await assertProfessor(supabase)
+  const p = await assertProfessor()
   if (!p.user) return { ok: false, error: p.error ?? "Nao autenticado" }
 
-  const { data: row, error: fetchErr } = await supabase
-    .from("content_items")
-    .select("id, settings, status, type")
-    .eq("id", contentItemId)
-    .eq("author_id", p.user.id)
-    .in("type", ["assessment", "simulado"])
-    .maybeSingle()
-
-  if (fetchErr || !row) return { ok: false, error: "Conteudo nao encontrado" }
+  const row = await queryOne<{ id: string; settings: any; status: string; type: string }>(
+    "select id, settings, status, type from public.content_items where id = $1 and author_id = $2 and type = any($3::text[])",
+    [contentItemId, p.user.id, ["assessment", "simulado"]]
+  )
+  if (!row) return { ok: false, error: "Conteudo nao encontrado" }
   if (row.status !== "published") {
     return { ok: false, error: "Publique o conteudo antes de encerrar" }
   }
 
   const merged = {
-    ...((row.settings ?? {}) as Record<string, unknown>),
+    ...asRecord(row.settings),
     assessmentClosed: true,
   }
 
-  const { error: upErr } = await supabase
-    .from("content_items")
-    .update({ settings: merged })
-    .eq("id", contentItemId)
-    .eq("author_id", p.user.id)
-    .in("type", ["assessment", "simulado"])
-
-  if (upErr) return { ok: false, error: upErr.message }
+  try {
+    await query(
+      "update public.content_items set settings = $1::jsonb where id = $2 and author_id = $3 and type = any($4::text[])",
+      [JSON.stringify(merged), contentItemId, p.user.id, ["assessment", "simulado"]]
+    )
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao encerrar avaliacao" }
+  }
   revalidatePath("/dashboard/professor/criar")
   revalidatePath("/dashboard/professor/conteudos")
   revalidatePath(`/conteudo/${contentItemId}`)
@@ -904,11 +890,10 @@ export type PublishArticleInput = {
 export async function publishArticle(
   input: PublishArticleInput
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const p = await assertProfessor(supabase)
+  const p = await assertProfessor()
   if (!p.user) return { ok: false, error: p.error ?? "Nao autenticado" }
 
-  const okOwn = await assertOwnsArticle(supabase, input.id, p.user.id)
+  const okOwn = await assertOwnsArticle(input.id, p.user.id)
   if (!okOwn) return { ok: false, error: "Artigo nao encontrado" }
 
   const title = input.title.trim()
@@ -919,17 +904,8 @@ export async function publishArticle(
     if (ids.length === 0) {
       return { ok: false, error: "Selecione ao menos uma turma" }
     }
-    for (const cid of ids) {
-      const owns = await supabase
-        .from("classrooms")
-        .select("id")
-        .eq("id", cid)
-        .eq("professor_id", p.user.id)
-        .maybeSingle()
-      if (!owns.data) {
-        return { ok: false, error: "Turma invalida" }
-      }
-    }
+    const ok = await assertOwnsAllClassrooms(p.user.id, ids).catch(() => false)
+    if (!ok) return { ok: false, error: "Turma invalida" }
   }
 
   const bodyHtml = sanitizeActivityHtml(input.bodyHtml.trim() || "")
@@ -941,31 +917,16 @@ export async function publishArticle(
     coverVideoUrl: input.settings.coverVideoUrl ?? null,
   }
 
-  const { error: upErr } = await supabase
-    .from("content_items")
-    .update({
-      title,
-      body_html: bodyHtml || null,
-      status: "verificando",
-      visibility: input.visibility,
-      published_at: null,
-      settings,
-    })
-    .eq("id", input.id)
-    .eq("author_id", p.user.id)
-    .eq("type", "article")
-
-  if (upErr) return { ok: false, error: upErr.message }
-
-  await supabase.from("content_item_classrooms").delete().eq("content_item_id", input.id)
-
-  if (input.visibility === "classrooms") {
-    const rows = (input.classroomIds ?? []).map((classroom_id) => ({
-      content_item_id: input.id,
-      classroom_id,
-    }))
-    const { error: jErr } = await supabase.from("content_item_classrooms").insert(rows)
-    if (jErr) return { ok: false, error: jErr.message }
+  try {
+    await query(
+      `update public.content_items
+       set title = $1, body_html = $2, status = 'verificando', visibility = $3, published_at = null, settings = $4::jsonb
+       where id = $5 and author_id = $6 and type = 'article'`,
+      [title, bodyHtml || null, input.visibility, JSON.stringify(settings), input.id, p.user.id]
+    )
+    await replaceContentItemClassrooms(input.id, input.visibility === "classrooms" ? input.classroomIds : [])
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao publicar artigo" }
   }
 
   // Agente roda em background após resposta enviada ao cliente
@@ -994,21 +955,16 @@ export type SaveDicaDraftInput = {
 export async function saveDicaDraft(
   input: SaveDicaDraftInput
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const p = await assertProfessor(supabase)
+  const p = await assertProfessor()
   if (!p.user) return { ok: false, error: p.error ?? "Nao autenticado" }
 
-  const { data: row, error: fetchErr } = await supabase
-    .from("content_items")
-    .select("id, settings, type")
-    .eq("id", input.id)
-    .eq("author_id", p.user.id)
-    .eq("type", "dica")
-    .maybeSingle()
+  const row = await queryOne<{ id: string; settings: any; type: string }>(
+    "select id, settings, type from public.content_items where id = $1 and author_id = $2 and type = 'dica'",
+    [input.id, p.user.id]
+  )
+  if (!row) return { ok: false, error: "Dica nao encontrada" }
 
-  if (fetchErr || !row) return { ok: false, error: "Dica nao encontrada" }
-
-  const current = (row.settings ?? {}) as Record<string, unknown>
+  const current = asRecord(row.settings)
   const normalizedImgs =
     input.settings.dicaImageUrls != null
       ? input.settings.dicaImageUrls
@@ -1048,14 +1004,22 @@ export async function saveDicaDraft(
       sanitizeActivityHtml(input.bodyHtml.trim().replace(/\n/g, "<br/>")) || null
   }
 
-  const { error: upErr } = await supabase
-    .from("content_items")
-    .update(patch)
-    .eq("id", input.id)
-    .eq("author_id", p.user.id)
-    .eq("type", "dica")
-
-  if (upErr) return { ok: false, error: upErr.message }
+  try {
+    await query(
+      "update public.content_items set title = coalesce($1, title), body_html = coalesce($2, body_html), settings = $3::jsonb where id = $4 and author_id = $5 and type = 'dica'",
+      [
+        input.title !== undefined ? input.title.trim() : null,
+        input.bodyHtml !== undefined
+          ? sanitizeActivityHtml(input.bodyHtml.trim().replace(/\n/g, "<br/>")) || null
+          : null,
+        JSON.stringify(merged),
+        input.id,
+        p.user.id,
+      ]
+    )
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao salvar dica" }
+  }
   revalidatePath("/dashboard/professor/criar")
   revalidatePath("/dashboard/professor/conteudos")
   revalidatePath(`/conteudo/${input.id}`)
@@ -1067,19 +1031,14 @@ export type PublishDicaInput = PublishArticleInput
 export async function publishDica(
   input: PublishDicaInput
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const p = await assertProfessor(supabase)
+  const p = await assertProfessor()
   if (!p.user) return { ok: false, error: p.error ?? "Nao autenticado" }
 
-  const { data: existingRow, error: exErr } = await supabase
-    .from("content_items")
-    .select("published_at, status, settings, type")
-    .eq("id", input.id)
-    .eq("author_id", p.user.id)
-    .eq("type", "dica")
-    .maybeSingle()
-
-  if (exErr || !existingRow) return { ok: false, error: "Dica nao encontrada" }
+  const existingRow = await queryOne<{ published_at: string | null; status: string; settings: any }>(
+    "select published_at, status, settings from public.content_items where id = $1 and author_id = $2 and type = 'dica'",
+    [input.id, p.user.id]
+  )
+  if (!existingRow) return { ok: false, error: "Dica nao encontrada" }
 
   const title = input.title.trim()
   if (!title) return { ok: false, error: "Titulo obrigatorio" }
@@ -1094,17 +1053,8 @@ export async function publishDica(
     if (ids.length === 0) {
       return { ok: false, error: "Selecione ao menos uma turma" }
     }
-    for (const cid of ids) {
-      const owns = await supabase
-        .from("classrooms")
-        .select("id")
-        .eq("id", cid)
-        .eq("professor_id", p.user.id)
-        .maybeSingle()
-      if (!owns.data) {
-        return { ok: false, error: "Turma invalida" }
-      }
-    }
+    const ok = await assertOwnsAllClassrooms(p.user.id, ids).catch(() => false)
+    if (!ok) return { ok: false, error: "Turma invalida" }
   }
 
   const imgs = input.settings.dicaImageUrls
@@ -1132,31 +1082,16 @@ export async function publishDica(
       ? existingRow.published_at
       : new Date().toISOString()
 
-  const { error: upErr } = await supabase
-    .from("content_items")
-    .update({
-      title,
-      body_html: bodyHtml,
-      status: "published",
-      visibility: input.visibility,
-      published_at: publishedAt,
-      settings: settings as Record<string, unknown>,
-    })
-    .eq("id", input.id)
-    .eq("author_id", p.user.id)
-    .eq("type", "dica")
-
-  if (upErr) return { ok: false, error: upErr.message }
-
-  await supabase.from("content_item_classrooms").delete().eq("content_item_id", input.id)
-
-  if (input.visibility === "classrooms") {
-    const rows = (input.classroomIds ?? []).map((classroom_id) => ({
-      content_item_id: input.id,
-      classroom_id,
-    }))
-    const { error: jErr } = await supabase.from("content_item_classrooms").insert(rows)
-    if (jErr) return { ok: false, error: jErr.message }
+  try {
+    await query(
+      `update public.content_items
+       set title = $1, body_html = $2, status = 'published', visibility = $3, published_at = $4, settings = $5::jsonb
+       where id = $6 and author_id = $7 and type = 'dica'`,
+      [title, bodyHtml, input.visibility, publishedAt, JSON.stringify(settings), input.id, p.user.id]
+    )
+    await replaceContentItemClassrooms(input.id, input.visibility === "classrooms" ? input.classroomIds : [])
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao publicar dica" }
   }
 
   revalidatePath("/dashboard/aluno")
@@ -1179,29 +1114,21 @@ export type ArticleForEdit = {
 export async function getArticleForEdit(
   id: string
 ): Promise<{ ok: true; article: ArticleForEdit } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const p = await assertProfessor(supabase)
+  const p = await assertProfessor()
   if (!p.user) return { ok: false, error: p.error ?? "Nao autenticado" }
 
-  const { data: row, error } = await supabase
-    .from("content_items")
-    .select("id, title, body_html, status, visibility, settings")
-    .eq("id", id)
-    .eq("author_id", p.user.id)
-    .eq("type", "article")
-    .maybeSingle()
+  const row = await queryOne<Pick<ContentItemRow, "id" | "title" | "body_html" | "status" | "visibility" | "settings">>(
+    "select id, title, body_html, status, visibility, settings from public.content_items where id = $1 and author_id = $2 and type = 'article'",
+    [id, p.user.id]
+  )
+  if (!row) return { ok: false, error: "Artigo nao encontrado" }
 
-  if (error || !row) return { ok: false, error: "Artigo nao encontrado" }
+  const cicRows = await query<{ classroom_id: string }>(
+    "select classroom_id from public.content_item_classrooms where content_item_id = $1",
+    [id]
+  )
 
-  const { data: cicRows } = await supabase
-    .from("content_item_classrooms")
-    .select("classroom_id")
-    .eq("content_item_id", id)
-
-  const r = row as Pick<
-    ContentItemRow,
-    "id" | "title" | "body_html" | "status" | "visibility" | "settings"
-  >
+  const r = row
 
   return {
     ok: true,
@@ -1211,7 +1138,7 @@ export async function getArticleForEdit(
       body_html: r.body_html,
       status: r.status,
       visibility: r.visibility,
-      settings: (r.settings ?? {}) as ContentItemSettings,
+      settings: asRecord(r.settings) as ContentItemSettings,
       classroomIds: (cicRows ?? []).map((c) => c.classroom_id as string),
     },
   }
@@ -1235,18 +1162,14 @@ export async function loadProfessorContentForEdit(
   | { ok: true; kind: "dica"; dica: ArticleForEdit }
   | { ok: false; error: string }
 > {
-  const supabase = await createClient()
-  const p = await assertProfessor(supabase)
+  const p = await assertProfessor()
   if (!p.user) return { ok: false, error: p.error ?? "Nao autenticado" }
 
-  const { data: row, error } = await supabase
-    .from("content_items")
-    .select("id, type, title, body_html, status, visibility, settings")
-    .eq("id", id)
-    .eq("author_id", p.user.id)
-    .maybeSingle()
-
-  if (error || !row) return { ok: false, error: "Conteudo nao encontrado" }
+  const row = await queryOne<Pick<ContentItemRow, "id" | "type" | "title" | "body_html" | "status" | "visibility" | "settings">>(
+    "select id, type, title, body_html, status, visibility, settings from public.content_items where id = $1 and author_id = $2",
+    [id, p.user.id]
+  )
+  if (!row) return { ok: false, error: "Conteudo nao encontrado" }
 
   const itemType = row.type as ContentItemType
   if (
@@ -1259,23 +1182,20 @@ export async function loadProfessorContentForEdit(
     return { ok: false, error: "Conteudo nao encontrado" }
   }
 
-  const { data: cicRows } = await supabase
-    .from("content_item_classrooms")
-    .select("classroom_id")
-    .eq("content_item_id", id)
+  const cicRows = await query<{ classroom_id: string }>(
+    "select classroom_id from public.content_item_classrooms where content_item_id = $1",
+    [id]
+  )
 
   const classroomIds = (cicRows ?? []).map((c) => c.classroom_id as string)
-  const r = row as Pick<
-    ContentItemRow,
-    "id" | "title" | "body_html" | "status" | "visibility" | "settings"
-  >
+  const r = row as any
   const base: ArticleForEdit = {
     id: r.id,
     title: r.title,
     body_html: r.body_html,
     status: r.status,
     visibility: r.visibility,
-    settings: (r.settings ?? {}) as ContentItemSettings,
+    settings: asRecord(r.settings) as ContentItemSettings,
     classroomIds,
   }
 
@@ -1288,7 +1208,7 @@ export async function loadProfessorContentForEdit(
   if (itemType === "exercise") {
     return { ok: true, kind: "exercise", exercise: base }
   }
-  const st = (r.settings ?? {}) as Record<string, unknown>
+  const st = asRecord(r.settings)
   const timed: AssessmentForEdit = {
     ...base,
     dueAt: typeof st.dueAt === "string" ? st.dueAt : null,
@@ -1308,17 +1228,14 @@ export async function loadProfessorContentForEdit(
 export async function deleteContentItem(
   id: string
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const p = await assertProfessor(supabase)
+  const p = await assertProfessor()
   if (!p.user) return { ok: false, error: p.error ?? "Nao autenticado" }
 
-  const { error } = await supabase
-    .from("content_items")
-    .delete()
-    .eq("id", id)
-    .eq("author_id", p.user.id)
-
-  if (error) return { ok: false, error: error.message }
+  try {
+    await query("delete from public.content_items where id = $1 and author_id = $2", [id, p.user.id])
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao excluir" }
+  }
 
   revalidatePath("/dashboard/aluno")
   revalidatePath("/dashboard/professor")
@@ -1338,11 +1255,10 @@ export async function uploadTrixArticleImage(
     return { ok: false, error: "BLOB_READ_WRITE_TOKEN nao configurado" }
   }
 
-  const supabase = await createClient()
-  const p = await assertProfessor(supabase)
+  const p = await assertProfessor()
   if (!p.user) return { ok: false, error: p.error ?? "Nao autenticado" }
 
-  const owns = await assertOwnsArticle(supabase, contentItemId, p.user.id)
+  const owns = await assertOwnsArticle(contentItemId, p.user.id)
   if (!owns) return { ok: false, error: "Artigo nao encontrado" }
 
   const file = formData.get("file")
@@ -1391,11 +1307,10 @@ export async function uploadArticleCoverImage(
     return { ok: false, error: "BLOB_READ_WRITE_TOKEN nao configurado" }
   }
 
-  const supabase = await createClient()
-  const p = await assertProfessor(supabase)
+  const p = await assertProfessor()
   if (!p.user) return { ok: false, error: p.error ?? "Nao autenticado" }
 
-  const owns = await assertOwnsArticle(supabase, contentItemId, p.user.id)
+  const owns = await assertOwnsArticle(contentItemId, p.user.id)
   if (!owns) return { ok: false, error: "Artigo nao encontrado" }
 
   const file = formData.get("file")
@@ -1444,19 +1359,16 @@ export async function uploadDicaImage(
     return { ok: false, error: "BLOB_READ_WRITE_TOKEN nao configurado" }
   }
 
-  const supabase = await createClient()
-  const p = await assertProfessor(supabase)
+  const p = await assertProfessor()
   if (!p.user) return { ok: false, error: "Nao autenticado" }
 
-  const owns = await assertOwnsArticle(supabase, contentItemId, p.user.id)
+  const owns = await assertOwnsArticle(contentItemId, p.user.id)
   if (!owns) return { ok: false, error: "Conteudo nao encontrado" }
 
-  const { data: ci } = await supabase
-    .from("content_items")
-    .select("type")
-    .eq("id", contentItemId)
-    .eq("author_id", p.user.id)
-    .maybeSingle()
+  const ci = await queryOne<{ type: string }>(
+    "select type from public.content_items where id = $1 and author_id = $2",
+    [contentItemId, p.user.id]
+  )
   if (ci?.type !== "dica") {
     return { ok: false, error: "Conteudo nao encontrado" }
   }
@@ -1507,11 +1419,10 @@ export async function uploadArticleCoverVideo(
     return { ok: false, error: "BLOB_READ_WRITE_TOKEN nao configurado" }
   }
 
-  const supabase = await createClient()
-  const p = await assertProfessor(supabase)
+  const p = await assertProfessor()
   if (!p.user) return { ok: false, error: p.error ?? "Nao autenticado" }
 
-  const owns = await assertOwnsArticle(supabase, contentItemId, p.user.id)
+  const owns = await assertOwnsArticle(contentItemId, p.user.id)
   if (!owns) return { ok: false, error: "Artigo nao encontrado" }
 
   const file = formData.get("file")
@@ -1553,58 +1464,42 @@ export type FeedContentItem = ContentItemRow & {
 export type FeedArticle = FeedContentItem
 
 export async function getFeedArticlesForCurrentUser(limit = 20): Promise<FeedContentItem[]> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return []
 
-  const { data: raw, error } = await supabase.rpc("feed_content_items_for_user", {
-    p_limit: limit,
-  })
-  if (error) return []
+  let articles: any[] = []
+  try {
+    articles = await query<any>(
+      "select * from public.feed_content_items_for_user($1, $2)",
+      [user.id, limit]
+    )
+  } catch {
+    return []
+  }
+  if (articles.length === 0) return []
 
-  const list: ContentItemRow[] = Array.isArray(raw)
-    ? (raw as ContentItemRow[])
-    : raw != null
-      ? [raw as ContentItemRow]
-      : []
-
-  if (list.length === 0) return []
-
-  const articles = list
   const authorIds = [
     ...new Set(
-      articles.map((a) => a.author_id).filter((id): id is string => typeof id === "string" && id.length > 0)
+      articles.map((a) => a.author_id).filter((id: any) => typeof id === "string" && id.length > 0)
     ),
   ]
-
   let profiles: { id: string; full_name: string | null; avatar_url: string | null }[] = []
   if (authorIds.length > 0) {
-    const { data: profRows } = await supabase
-      .from("profiles")
-      .select("id, full_name, avatar_url")
-      .in("id", authorIds)
-    profiles = profRows ?? []
+    profiles = await query<{ id: string; full_name: string | null; avatar_url: string | null }>(
+      "select id, full_name, avatar_url from public.profiles where id = any($1::uuid[])",
+      [authorIds]
+    )
   }
-
   const byId = new Map(profiles.map((p) => [p.id, p]))
 
   return articles
-    .filter(
-      (a) =>
-        a.type === "article" ||
-        a.type === "exercise" ||
-        a.type === "assessment" ||
-        a.type === "simulado" ||
-        a.type === "dica"
-    )
+    .filter((a) => a && (a.type === "article" || a.type === "exercise" || a.type === "assessment" || a.type === "simulado" || a.type === "dica"))
     .map((a) => ({
-      ...a,
-      settings: (a.settings ?? {}) as ContentItemSettings,
+      ...(a as ContentItemRow),
+      settings: asRecord((a as any).settings) as ContentItemSettings,
       author: {
-        full_name: byId.get(a.author_id)?.full_name ?? null,
-        avatar_url: byId.get(a.author_id)?.avatar_url ?? null,
+        full_name: byId.get((a as any).author_id)?.full_name ?? null,
+        avatar_url: byId.get((a as any).author_id)?.avatar_url ?? null,
       },
     }))
 }
@@ -1613,20 +1508,15 @@ export async function getMyLikesForContentIds(
   contentIds: string[]
 ): Promise<Set<string>> {
   if (contentIds.length === 0) return new Set()
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return new Set()
 
-  const { data } = await supabase
-    .from("content_reactions")
-    .select("content_item_id")
-    .eq("user_id", user.id)
-    .eq("reaction_type", "like")
-    .in("content_item_id", contentIds)
+  const rows = await query<{ content_item_id: string }>(
+    "select content_item_id from public.content_reactions where user_id = $1 and reaction_type = 'like' and content_item_id = any($2::uuid[])",
+    [user.id, contentIds]
+  ).catch(() => [])
 
-  return new Set((data ?? []).map((r) => r.content_item_id))
+  return new Set(rows.map((r) => r.content_item_id))
 }
 
 export async function toggleContentLike(
@@ -1635,40 +1525,31 @@ export async function toggleContentLike(
   | { ok: true; liked: boolean; likeCount: number }
   | { ok: false; error: string }
 > {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const { data: existing } = await supabase
-    .from("content_reactions")
-    .select("id")
-    .eq("content_item_id", contentItemId)
-    .eq("user_id", user.id)
-    .eq("reaction_type", "like")
-    .maybeSingle()
+  const existing = await queryOne<{ id: string }>(
+    "select id from public.content_reactions where content_item_id = $1 and user_id = $2 and reaction_type = 'like'",
+    [contentItemId, user.id]
+  )
 
-  if (existing) {
-    const { error: delErr } = await supabase
-      .from("content_reactions")
-      .delete()
-      .eq("id", existing.id)
-    if (delErr) return { ok: false, error: delErr.message }
-  } else {
-    const { error: insErr } = await supabase.from("content_reactions").insert({
-      content_item_id: contentItemId,
-      user_id: user.id,
-      reaction_type: "like",
-    })
-    if (insErr) return { ok: false, error: insErr.message }
+  try {
+    if (existing) {
+      await query("delete from public.content_reactions where id = $1", [existing.id])
+    } else {
+      await query(
+        "insert into public.content_reactions (content_item_id, user_id, reaction_type) values ($1, $2, 'like') on conflict do nothing",
+        [contentItemId, user.id]
+      )
+    }
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao reagir" }
   }
 
-  const { data: row } = await supabase
-    .from("content_items")
-    .select("like_count")
-    .eq("id", contentItemId)
-    .single()
+  const row = await queryOne<{ like_count: number }>(
+    "select like_count from public.content_items where id = $1",
+    [contentItemId]
+  )
 
   revalidatePath("/dashboard/aluno")
   revalidatePath(`/conteudo/${contentItemId}`)
@@ -1684,23 +1565,20 @@ export async function recordContentShare(
   contentItemId: string,
   method: ShareMethod
 ): Promise<{ ok: true; shareCount: number } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
+  try {
+    await query(
+      "insert into public.content_share_events (content_item_id, user_id, share_method) values ($1, $2, $3)",
+      [contentItemId, user?.id ?? null, method]
+    )
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao registrar compartilhamento" }
+  }
 
-  const { error } = await supabase.from("content_share_events").insert({
-    content_item_id: contentItemId,
-    user_id: user?.id ?? null,
-    share_method: method,
-  })
-  if (error) return { ok: false, error: error.message }
-
-  const { data: row } = await supabase
-    .from("content_items")
-    .select("share_count")
-    .eq("id", contentItemId)
-    .single()
+  const row = await queryOne<{ share_count: number }>(
+    "select share_count from public.content_items where id = $1",
+    [contentItemId]
+  )
 
   revalidatePath("/dashboard/aluno")
   revalidatePath(`/conteudo/${contentItemId}`)
@@ -1718,25 +1596,20 @@ export async function getContentItemById(
     }
   | { ok: false; error: string }
 > {
-  const supabase = await createClient()
-  const { data: item, error } = await supabase
-    .from("content_items")
-    .select("*")
-    .eq("id", id)
-    .maybeSingle()
+  const item = await queryOne<ContentItemRow>(
+    "select * from public.content_items where id = $1",
+    [id]
+  )
+  if (!item) return { ok: false, error: "Conteudo nao encontrado" }
 
-  if (error || !item) return { ok: false, error: "Conteudo nao encontrado" }
-
-  const row = item as ContentItemRow
-  const { data: author } = await supabase
-    .from("profiles")
-    .select("full_name, avatar_url")
-    .eq("id", row.author_id)
-    .maybeSingle()
+  const author = await queryOne<{ full_name: string | null; avatar_url: string | null }>(
+    "select full_name, avatar_url from public.profiles where id = $1",
+    [item.author_id]
+  )
 
   return {
     ok: true,
-    item: { ...row, settings: (row.settings ?? {}) as ContentItemSettings },
+    item: { ...item, settings: asRecord((item as any).settings) as ContentItemSettings },
     author: {
       full_name: author?.full_name ?? null,
       avatar_url: author?.avatar_url ?? null,

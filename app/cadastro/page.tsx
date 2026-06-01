@@ -1,8 +1,9 @@
 "use client"
 
-import { useState, useEffect, Suspense } from "react"
+import { useState, useEffect, Suspense, useRef } from "react"
 import Link from "next/link"
 import { useRouter, useSearchParams } from "next/navigation"
+import { signIn } from "next-auth/react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -22,7 +23,6 @@ import {
   ArrowLeft,
   AlertCircle
 } from "lucide-react"
-import { createClient } from "@/lib/supabase/client"
 
 const niveisEnsino = [
   "Fundamental I",
@@ -64,6 +64,9 @@ function CadastroContent() {
   const [error, setError] = useState<string | null>(null)
   const [selectedMaterias, setSelectedMaterias] = useState<string[]>([])
   const [selectedNiveis, setSelectedNiveis] = useState<string[]>([])
+
+  const professorDocInputRef = useRef<HTMLInputElement | null>(null)
+  const [professorDoc, setProfessorDoc] = useState<File | null>(null)
   
   const [formData, setFormData] = useState({
     nome: "",
@@ -122,44 +125,95 @@ function CadastroContent() {
       return
     }
     
-    const supabase = createClient()
-    
-    const { data, error: signUpError } = await supabase.auth.signUp({
-      email: formData.email,
-      password: formData.password,
-      options: {
-        emailRedirectTo: process.env.NEXT_PUBLIC_DEV_SUPABASE_REDIRECT_URL || 
-          `${window.location.origin}/login`,
-        data: {
-          full_name: formData.nome,
-          user_type: userType,
-          interests: userType === "aluno" ? selectedMaterias : selectedMaterias,
-          ...(userType === "aluno" && codigoConvite?.trim()
-            ? { pending_invite_code: codigoConvite.trim().toUpperCase() }
-            : {}),
-        },
-      },
-    })
-    
-    if (signUpError) {
-      if (signUpError.message.includes("already registered")) {
-        setError("Este e-mail ja esta cadastrado. Tente fazer login.")
-      } else {
-        setError(signUpError.message)
-      }
+    if (!userType) {
+      setError("Selecione se voce e aluno ou professor")
       setIsLoading(false)
       return
     }
-    
-    if (data.user) {
-      setStep("confirmacao")
+
+    if (userType === "professor" && !professorDoc) {
+      setError("Envie um documento para verificacao")
+      setIsLoading(false)
+      return
     }
-    
+
+    const res = await fetch("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        email: formData.email,
+        password: formData.password,
+        fullName: formData.nome,
+        userType,
+        interests: selectedMaterias,
+      }),
+    })
+
+    const payload = await res.json().catch(() => ({}))
+    if (!res.ok || !payload?.ok) {
+      setError(payload?.error || "Nao foi possivel criar a conta")
+      setIsLoading(false)
+      return
+    }
+
+    // Auto-login after signup
+    await signIn("credentials", {
+      redirect: false,
+      email: formData.email,
+      password: formData.password,
+    })
+
+    if (userType === "professor" && professorDoc) {
+      try {
+        const fd = new FormData()
+        fd.set("file", professorDoc)
+        const up = await fetch("/api/professor-verification/upload", {
+          method: "POST",
+          body: fd,
+        })
+        const upPayload = await up.json().catch(() => ({}))
+        if (!up.ok || !upPayload?.ok) {
+          setError(upPayload?.error || "Falha ao enviar documento")
+          setIsLoading(false)
+          return
+        }
+      } catch {
+        setError("Falha ao enviar documento")
+        setIsLoading(false)
+        return
+      }
+    }
+
+    setStep("confirmacao")
     setIsLoading(false)
   }
 
   const handleContinue = () => {
-    router.push("/login")
+    if (userType === "professor") {
+      router.push("/dashboard/professor?status=pendente")
+      return
+    }
+    router.push("/dashboard/aluno")
+  }
+
+  const acceptDoc = "application/pdf,image/jpeg,image/png"
+
+  const onPickProfessorDoc = (file: File | null) => {
+    if (!file) {
+      setProfessorDoc(null)
+      return
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setError("Arquivo muito grande (max 5MB)")
+      setProfessorDoc(null)
+      return
+    }
+    if (file.type && !acceptDoc.split(",").includes(file.type)) {
+      setError("Tipo de arquivo nao permitido")
+      setProfessorDoc(null)
+      return
+    }
+    setProfessorDoc(file)
   }
 
   return (
@@ -464,13 +518,29 @@ function CadastroContent() {
                         <li>- Contracheque de instituicao de ensino</li>
                         <li>- Registro no Conselho de Educacao</li>
                       </ul>
-                      <div className="border-2 border-dashed border-amber-300 rounded-lg p-6 text-center bg-white">
+                      <input
+                        ref={professorDocInputRef}
+                        type="file"
+                        accept={acceptDoc}
+                        className="hidden"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0] ?? null
+                          onPickProfessorDoc(f)
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => professorDocInputRef.current?.click()}
+                        className="w-full border-2 border-dashed border-amber-300 rounded-lg p-6 text-center bg-white hover:bg-amber-50/40 transition-colors"
+                      >
                         <Upload className="h-8 w-8 text-amber-400 mx-auto mb-2" />
                         <p className="text-sm text-amber-700">
-                          Arraste um arquivo ou <span className="text-[#1D4ED8] font-medium cursor-pointer">clique para enviar</span>
+                          {professorDoc
+                            ? `Selecionado: ${professorDoc.name}`
+                            : "Arraste um arquivo ou clique para enviar"}
                         </p>
                         <p className="text-xs text-amber-600 mt-1">PDF, JPG ou PNG (max 5MB)</p>
-                      </div>
+                      </button>
                       <p className="text-xs text-amber-600 mt-3">
                         Seus documentos sao analisados com seguranca e nao serao compartilhados.
                       </p>

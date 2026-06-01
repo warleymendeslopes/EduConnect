@@ -1,6 +1,6 @@
 import { get } from "@vercel/blob"
 import { NextRequest, NextResponse } from "next/server"
-import { createClient } from "@/lib/supabase/server"
+import { queryOne } from "@/lib/db/query"
 
 export const runtime = "nodejs"
 
@@ -30,12 +30,10 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Invalid pathname" }, { status: 400 })
   }
 
-  const supabase = await createClient()
-  const { data: row } = await supabase
-    .from("content_items")
-    .select("id")
-    .eq("id", contentItemId)
-    .maybeSingle()
+  const row = await queryOne<{ id: string }>(
+    "select id from public.content_items where id = $1",
+    [contentItemId]
+  )
 
   if (!row) {
     return NextResponse.json({ error: "Not found" }, { status: 404 })

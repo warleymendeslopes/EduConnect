@@ -40,7 +40,7 @@ export default async function ProfessorSalasPage({
         <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
           {error}. Se ainda nao aplicou o SQL das salas, execute{" "}
           <code className="font-mono text-xs">scripts/002_classrooms.sql</code> no
-          Supabase.
+          Postgres.
         </div>
       )}
 

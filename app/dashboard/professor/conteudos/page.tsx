@@ -1,23 +1,20 @@
 import { listMyContentItemsForProfessor } from "@/app/actions/content-items"
 import { ProfessorContentFeed } from "@/components/dashboard/professor-content-feed"
 import { ProfessorFeedSidebar } from "@/components/dashboard/professor-feed-sidebar"
-import { createClient } from "@/lib/supabase/server"
+import { requireAuthedUser } from "@/lib/auth/user"
+import { queryOne } from "@/lib/db/query"
 import { ArrowLeft } from "lucide-react"
 import Link from "next/link"
 import { redirect } from "next/navigation"
 
 export default async function ProfessorMeuFeedPage() {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) redirect("/login")
 
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("full_name, avatar_url, user_type")
-    .eq("id", user.id)
-    .maybeSingle()
+  const profile = await queryOne<{ full_name: string | null; avatar_url: string | null; user_type: string }>(
+    "select full_name, avatar_url, user_type from public.profiles where id = $1",
+    [user.id]
+  )
 
   if (profile?.user_type !== "professor") {
     redirect("/dashboard/aluno")

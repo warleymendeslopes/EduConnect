@@ -3,7 +3,9 @@
 import { del, put } from "@vercel/blob"
 import { randomUUID } from "crypto"
 import { revalidatePath } from "next/cache"
-import { createClient } from "@/lib/supabase/server"
+import { requireAuthedUser } from "@/lib/auth/user"
+import { dbPool } from "@/lib/db/pool"
+import { query, queryOne } from "@/lib/db/query"
 import {
   effectiveContentType,
   inferMimeFromFilename,
@@ -40,17 +42,14 @@ function isCoverImageType(mime: string, filename: string): boolean {
 }
 
 async function assertProfessorOwnsClassroom(
-  supabase: Awaited<ReturnType<typeof createClient>>,
   classroomId: string,
   userId: string
 ): Promise<boolean> {
-  const { data } = await supabase
-    .from("classrooms")
-    .select("id")
-    .eq("id", classroomId)
-    .eq("professor_id", userId)
-    .maybeSingle()
-  return !!data
+  const row = await queryOne<{ id: string }>(
+    "select id from public.classrooms where id = $1 and professor_id = $2",
+    [classroomId, userId]
+  )
+  return !!row
 }
 
 function revalidateClassroomMuralPaths(classroomId: string) {
@@ -69,18 +68,13 @@ export type CreateClassroomInput = {
 export async function createClassroom(
   input: CreateClassroomInput
 ): Promise<{ ok: true; id: string; inviteCode: string } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("user_type")
-    .eq("id", user.id)
-    .single()
-
+  const profile = await queryOne<{ user_type: string }>(
+    "select user_type from public.profiles where id = $1",
+    [user.id]
+  )
   if (profile?.user_type !== "professor") {
     return { ok: false, error: "Apenas professores podem criar salas" }
   }
@@ -95,31 +89,36 @@ export async function createClassroom(
   let lastError: string | null = null
   for (let attempt = 0; attempt < MAX_CREATE_ATTEMPTS; attempt++) {
     const inviteCode = buildInviteCode()
-    const { data, error } = await supabase
-      .from("classrooms")
-      .insert({
-        professor_id: user.id,
-        name,
-        subject,
-        education_level: educationLevel,
-        description: input.description.trim() || null,
-        invite_code: inviteCode,
-        max_students: input.maxStudents,
-        status: "ativa",
-      })
-      .select("id, invite_code")
-      .single()
-
-    if (!error && data) {
+    try {
+      const data = await queryOne<{ id: string; invite_code: string }>(
+        `insert into public.classrooms
+          (professor_id, name, subject, education_level, description, invite_code, max_students, status, created_at, updated_at)
+         values ($1,$2,$3,$4,$5,$6,$7,'ativa', timezone('utc'::text, now()), timezone('utc'::text, now()))
+         returning id, invite_code`,
+        [
+          user.id,
+          name,
+          subject,
+          educationLevel,
+          input.description.trim() || null,
+          inviteCode,
+          input.maxStudents,
+        ]
+      )
+      if (data) {
       revalidatePath("/dashboard/professor/salas")
       return { ok: true, id: data.id, inviteCode: data.invite_code }
+      }
+      lastError = "Erro ao criar sala"
+      break
+    } catch (e: any) {
+      if (e?.code === "23505") {
+        lastError = "Colisao de codigo, tentando novamente"
+        continue
+      }
+      lastError = e?.message ?? "Erro ao criar sala"
+      break
     }
-    if (error?.code === "23505") {
-      lastError = "Colisao de codigo, tentando novamente"
-      continue
-    }
-    lastError = error?.message ?? "Erro ao criar sala"
-    break
   }
 
   return { ok: false, error: lastError ?? "Erro ao criar sala" }
@@ -150,187 +149,115 @@ export async function joinClassroomByInvite(
   const code = normalizeInviteCodeInput(rawCode)
   if (!code) return { ok: false, error: "Informe o codigo de convite" }
 
-  const supabase = await createClient()
-  const { data, error } = await supabase.rpc("join_classroom_by_invite", {
-    p_invite_code: code,
-  })
+  const user = await requireAuthedUser().catch(() => null)
+  if (!user) return { ok: false, error: "Faca login para entrar na sala" }
 
-  if (error) {
-    return { ok: false, error: error.message }
+  let data: any = null
+  try {
+    const row = await queryOne<{ join_classroom_by_invite: any }>(
+      "select public.join_classroom_by_invite($1, $2) as join_classroom_by_invite",
+      [user.id, code]
+    )
+    data = row?.join_classroom_by_invite ?? null
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Nao foi possivel entrar na sala" }
   }
+
   const result = mapJoinRpc(data)
   if (result.ok) {
     revalidatePath("/dashboard/aluno/salas")
     revalidatePath("/dashboard/professor/salas")
-    await clearPendingInviteMetadata(supabase)
   }
   return result
-}
-
-async function clearPendingInviteMetadata(supabase: Awaited<ReturnType<typeof createClient>>) {
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-  if (!user?.user_metadata?.pending_invite_code) return
-  await supabase.auth.updateUser({
-    data: {
-      ...user.user_metadata,
-      pending_invite_code: null,
-    },
-  })
 }
 
 export async function listClassroomsForProfessor(): Promise<{
   rows: (ClassroomRow & { member_count: number })[]
   error: string | null
 }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { rows: [], error: "Nao autenticado" }
 
-  const { data: rooms, error } = await supabase
-    .from("classrooms")
-    .select("*")
-    .eq("professor_id", user.id)
-    .order("created_at", { ascending: false })
-
-  if (error || !rooms) return { rows: [], error: error?.message ?? "Erro ao carregar salas" }
-
-  const ids = rooms.map((r) => r.id)
-  if (ids.length === 0) return { rows: [], error: null }
-
-  const { data: counts } = await supabase
-    .from("classroom_members")
-    .select("classroom_id")
-    .in("classroom_id", ids)
-
-  const countMap = new Map<string, number>()
-  for (const row of counts ?? []) {
-    const id = row.classroom_id as string
-    countMap.set(id, (countMap.get(id) ?? 0) + 1)
+  try {
+    const rows = await query<(ClassroomRow & { member_count: number })>(
+      `select c.*, count(cm.id)::int as member_count
+       from public.classrooms c
+       left join public.classroom_members cm on cm.classroom_id = c.id
+       where c.professor_id = $1
+       group by c.id
+       order by c.created_at desc`,
+      [user.id]
+    )
+    return { rows, error: null }
+  } catch (e: any) {
+    return { rows: [], error: e?.message ?? "Erro ao carregar salas" }
   }
-
-  const rows = rooms.map((r) => ({
-    ...(r as ClassroomRow),
-    member_count: countMap.get(r.id) ?? 0,
-  }))
-
-  return { rows, error: null }
 }
 
 export async function listClassroomsForStudent(): Promise<{
   rows: (ClassroomRow & { professor_name: string | null })[]
   error: string | null
 }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { rows: [], error: "Nao autenticado" }
 
-  const { data: members, error: mErr } = await supabase
-    .from("classroom_members")
-    .select("classroom_id")
-    .eq("student_id", user.id)
-
-  if (mErr || !members?.length) {
-    return { rows: [], error: mErr?.message ?? null }
+  try {
+    const rows = await query<(ClassroomRow & { professor_name: string | null })>(
+      `select c.*, p.full_name as professor_name
+       from public.classroom_members cm
+       join public.classrooms c on c.id = cm.classroom_id
+       join public.profiles p on p.id = c.professor_id
+       where cm.student_id = $1
+       order by c.created_at desc`,
+      [user.id]
+    )
+    return { rows, error: null }
+  } catch (e: any) {
+    return { rows: [], error: e?.message ?? "Erro ao carregar salas" }
   }
-
-  const ids = members.map((m) => m.classroom_id)
-  const { data: rooms, error } = await supabase
-    .from("classrooms")
-    .select("*")
-    .in("id", ids)
-    .order("created_at", { ascending: false })
-
-  if (error || !rooms) return { rows: [], error: error?.message ?? "Erro ao carregar salas" }
-
-  const profIds = [...new Set(rooms.map((r) => r.professor_id))]
-  const { data: profs } = await supabase
-    .from("profiles")
-    .select("id, full_name")
-    .in("id", profIds)
-
-  const nameById = new Map((profs ?? []).map((p) => [p.id, p.full_name]))
-
-  const rows = rooms.map((r) => ({
-    ...(r as ClassroomRow),
-    professor_name: nameById.get(r.professor_id) ?? null,
-  }))
-
-  return { rows, error: null }
 }
 
 export async function getClassroomForProfessor(
   classroomId: string
 ): Promise<{ row: ClassroomRow & { member_count: number }; error: string | null } | { row: null; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { row: null, error: "Nao autenticado" }
 
-  const { data: room, error } = await supabase
-    .from("classrooms")
-    .select("*")
-    .eq("id", classroomId)
-    .eq("professor_id", user.id)
-    .maybeSingle()
-
-  if (error || !room) return { row: null, error: error?.message ?? "Sala nao encontrada" }
-
-  const { count } = await supabase
-    .from("classroom_members")
-    .select("*", { count: "exact", head: true })
-    .eq("classroom_id", classroomId)
-
-  return {
-    row: { ...(room as ClassroomRow), member_count: count ?? 0 },
-    error: null,
+  try {
+    const row = await queryOne<(ClassroomRow & { member_count: number })>(
+      `select c.*, count(cm.id)::int as member_count
+       from public.classrooms c
+       left join public.classroom_members cm on cm.classroom_id = c.id
+       where c.id = $1 and c.professor_id = $2
+       group by c.id`,
+      [classroomId, user.id]
+    )
+    if (!row) return { row: null, error: "Sala nao encontrada" }
+    return { row, error: null }
+  } catch (e: any) {
+    return { row: null, error: e?.message ?? "Sala nao encontrada" }
   }
 }
 
 export async function getClassroomForStudent(
   classroomId: string
 ): Promise<{ row: ClassroomRow & { professor_name: string | null }; error: string | null } | { row: null; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { row: null, error: "Nao autenticado" }
 
-  const { data: member } = await supabase
-    .from("classroom_members")
-    .select("id")
-    .eq("classroom_id", classroomId)
-    .eq("student_id", user.id)
-    .maybeSingle()
-
-  if (!member) return { row: null, error: "Voce nao participa desta sala" }
-
-  const { data: room, error } = await supabase
-    .from("classrooms")
-    .select("*")
-    .eq("id", classroomId)
-    .maybeSingle()
-
-  if (error || !room) return { row: null, error: error?.message ?? "Sala nao encontrada" }
-
-  const { data: prof } = await supabase
-    .from("profiles")
-    .select("full_name")
-    .eq("id", room.professor_id)
-    .maybeSingle()
-
-  return {
-    row: {
-      ...(room as ClassroomRow),
-      professor_name: prof?.full_name ?? null,
-    },
-    error: null,
+  try {
+    const row = await queryOne<(ClassroomRow & { professor_name: string | null })>(
+      `select c.*, p.full_name as professor_name
+       from public.classroom_members cm
+       join public.classrooms c on c.id = cm.classroom_id
+       join public.profiles p on p.id = c.professor_id
+       where cm.classroom_id = $1 and cm.student_id = $2`,
+      [classroomId, user.id]
+    )
+    if (!row) return { row: null, error: "Voce nao participa desta sala" }
+    return { row, error: null }
+  } catch (e: any) {
+    return { row: null, error: e?.message ?? "Sala nao encontrada" }
   }
 }
 
@@ -338,44 +265,25 @@ export async function listMembersForClassroom(classroomId: string): Promise<{
   members: { student_id: string; full_name: string | null; joined_at: string }[]
   error: string | null
 }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { members: [], error: "Nao autenticado" }
 
-  const { data: room } = await supabase
-    .from("classrooms")
-    .select("id")
-    .eq("id", classroomId)
-    .eq("professor_id", user.id)
-    .maybeSingle()
+  const ok = await assertProfessorOwnsClassroom(classroomId, user.id)
+  if (!ok) return { members: [], error: "Sala nao encontrada" }
 
-  if (!room) return { members: [], error: "Sala nao encontrada" }
-
-  const { data: rows, error } = await supabase
-    .from("classroom_members")
-    .select("student_id, joined_at")
-    .eq("classroom_id", classroomId)
-    .order("joined_at", { ascending: true })
-
-  if (error || !rows) return { members: [], error: error?.message ?? "Erro ao listar alunos" }
-
-  const studentIds = rows.map((r) => r.student_id)
-  const { data: profiles } = await supabase
-    .from("profiles")
-    .select("id, full_name")
-    .in("id", studentIds)
-
-  const nameById = new Map((profiles ?? []).map((p) => [p.id, p.full_name]))
-
-  const members = rows.map((r) => ({
-    student_id: r.student_id,
-    full_name: nameById.get(r.student_id) ?? null,
-    joined_at: r.joined_at as string,
-  }))
-
-  return { members, error: null }
+  try {
+    const members = await query<{ student_id: string; full_name: string | null; joined_at: string }>(
+      `select cm.student_id, p.full_name, cm.joined_at
+       from public.classroom_members cm
+       join public.profiles p on p.id = cm.student_id
+       where cm.classroom_id = $1
+       order by cm.joined_at asc`,
+      [classroomId]
+    )
+    return { members, error: null }
+  } catch (e: any) {
+    return { members: [], error: e?.message ?? "Erro ao listar alunos" }
+  }
 }
 
 const PROFESSOR_STUDENTS_DEFAULT_PAGE_SIZE = 25
@@ -415,10 +323,7 @@ export type ListStudentsAcrossClassroomsResult = {
 export async function listStudentsAcrossClassroomsForProfessor(
   opts?: ListStudentsAcrossClassroomsOptions
 ): Promise<ListStudentsAcrossClassroomsResult> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) {
     return {
       rows: [],
@@ -429,11 +334,10 @@ export async function listStudentsAcrossClassroomsForProfessor(
     }
   }
 
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("user_type")
-    .eq("id", user.id)
-    .maybeSingle()
+  const profile = await queryOne<{ user_type: string }>(
+    "select user_type from public.profiles where id = $1",
+    [user.id]
+  )
 
   if (profile?.user_type !== "professor") {
     return {
@@ -454,23 +358,15 @@ export async function listStudentsAcrossClassroomsForProfessor(
   const page = Math.max(1, Math.floor(pageRaw) || 1)
   const search = opts?.search?.trim() ?? ""
 
-  const { data: rooms, error: roomErr } = await supabase
-    .from("classrooms")
-    .select("id, name, subject")
-    .eq("professor_id", user.id)
-    .order("name", { ascending: true })
-
-  if (roomErr) {
-    return {
-      rows: [],
-      total: 0,
-      page: 1,
-      pageSize,
-      error: roomErr.message,
-    }
+  let roomList: { id: string; name: string; subject: string }[] = []
+  try {
+    roomList = await query<{ id: string; name: string; subject: string }>(
+      "select id, name, subject from public.classrooms where professor_id = $1 order by name asc",
+      [user.id]
+    )
+  } catch (e: any) {
+    return { rows: [], total: 0, page: 1, pageSize, error: e?.message ?? "Erro ao listar salas" }
   }
-
-  const roomList = rooms ?? []
   if (roomList.length === 0) {
     return {
       rows: [],
@@ -492,19 +388,14 @@ export async function listStudentsAcrossClassroomsForProfessor(
 
   const classroomIds = roomList.map((r) => r.id as string)
 
-  const { data: memberRows, error: memErr } = await supabase
-    .from("classroom_members")
-    .select("student_id, classroom_id")
-    .in("classroom_id", classroomIds)
-
-  if (memErr || !memberRows) {
-    return {
-      rows: [],
-      total: 0,
-      page: 1,
-      pageSize,
-      error: memErr?.message ?? "Erro ao listar matriculas",
-    }
+  let memberRows: { student_id: string; classroom_id: string }[] = []
+  try {
+    memberRows = await query<{ student_id: string; classroom_id: string }>(
+      "select student_id, classroom_id from public.classroom_members where classroom_id = any($1::uuid[])",
+      [classroomIds]
+    )
+  } catch (e: any) {
+    return { rows: [], total: 0, page: 1, pageSize, error: e?.message ?? "Erro ao listar matriculas" }
   }
 
   const byStudent = new Map<string, Map<string, ProfessorStudentClassroomRef>>()
@@ -536,25 +427,16 @@ export async function listStudentsAcrossClassroomsForProfessor(
   const profiles: { id: string; full_name: string | null }[] = []
   for (let i = 0; i < studentIds.length; i += CHUNK) {
     const chunk = studentIds.slice(i, i + CHUNK)
-    const { data: profChunk, error: profErr } = await supabase
-      .from("profiles")
-      .select("id, full_name")
-      .in("id", chunk)
-
-    if (profErr) {
-      return {
-        rows: [],
-        total: 0,
-        page: 1,
-        pageSize,
-        error: profErr.message,
+    try {
+      const profChunk = await query<{ id: string; full_name: string | null }>(
+        "select id, full_name from public.profiles where id = any($1::uuid[])",
+        [chunk]
+      )
+      for (const p of profChunk) {
+        profiles.push({ id: p.id, full_name: p.full_name ?? null })
       }
-    }
-    for (const p of profChunk ?? []) {
-      profiles.push({
-        id: p.id as string,
-        full_name: (p.full_name as string | null) ?? null,
-      })
+    } catch (e: any) {
+      return { rows: [], total: 0, page: 1, pageSize, error: e?.message ?? "Erro ao carregar perfis" }
     }
   }
 
@@ -601,16 +483,19 @@ export async function getClassroomPreviewByInviteCode(rawCode: string): Promise<
   preview: ClassroomPreview | null
   error: string | null
 }> {
-  const supabase = await createClient()
   const code = normalizeInviteCodeInput(rawCode)
   if (!code) return { preview: null, error: null }
 
-  const { data, error } = await supabase.rpc("get_classroom_by_invite_code", {
-    p_code: code,
-  })
-
-  if (error) return { preview: null, error: error.message }
-  const row = Array.isArray(data) ? data[0] : data
+  let row: any = null
+  try {
+    const r = await queryOne<{ id: string; name: string; subject: string; education_level: string; professor_name: string; status: string }>(
+      "select * from public.get_classroom_by_invite_code($1)",
+      [code]
+    )
+    row = r
+  } catch (e: any) {
+    return { preview: null, error: e?.message ?? "Erro ao buscar sala" }
+  }
   if (!row) return { preview: null, error: null }
 
   return {
@@ -626,35 +511,24 @@ export async function getClassroomPreviewByInviteCode(rawCode: string): Promise<
   }
 }
 
-/** Chamar no cliente apos login/cadastro quando metadata tiver pending_invite_code */
-export async function processPendingInviteIfAny(): Promise<JoinClassroomResult | null> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-  if (!user) return null
-  const raw = user.user_metadata?.pending_invite_code
-  if (!raw || typeof raw !== "string") return null
-  return joinClassroomByInvite(raw)
-}
-
 export async function removeClassroomMember(
   classroomId: string,
   studentId: string
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const { error } = await supabase
-    .from("classroom_members")
-    .delete()
-    .eq("classroom_id", classroomId)
-    .eq("student_id", studentId)
+  const ok = await assertProfessorOwnsClassroom(classroomId, user.id)
+  if (!ok) return { ok: false, error: "Sala nao encontrada" }
 
-  if (error) return { ok: false, error: error.message }
+  try {
+    await query("delete from public.classroom_members where classroom_id = $1 and student_id = $2", [
+      classroomId,
+      studentId,
+    ])
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao remover aluno" }
+  }
   revalidatePath(`/dashboard/professor/salas/${classroomId}`)
   revalidatePath("/dashboard/professor/salas")
   revalidatePath("/dashboard/professor/alunos")
@@ -665,13 +539,10 @@ export async function updateClassroomMural(
   classroomId: string,
   description: string
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const ok = await assertProfessorOwnsClassroom(supabase, classroomId, user.id)
+  const ok = await assertProfessorOwnsClassroom(classroomId, user.id)
   if (!ok) return { ok: false, error: "Sala nao encontrada" }
 
   const trimmed = description.trim()
@@ -682,13 +553,14 @@ export async function updateClassroomMural(
     }
   }
 
-  const { error } = await supabase
-    .from("classrooms")
-    .update({ description: trimmed || null })
-    .eq("id", classroomId)
-    .eq("professor_id", user.id)
-
-  if (error) return { ok: false, error: error.message }
+  try {
+    await query(
+      "update public.classrooms set description = $1 where id = $2 and professor_id = $3",
+      [trimmed || null, classroomId, user.id]
+    )
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao atualizar mural" }
+  }
   revalidateClassroomMuralPaths(classroomId)
   return { ok: true }
 }
@@ -702,13 +574,10 @@ export async function uploadClassroomCover(
     return { ok: false, error: "BLOB_READ_WRITE_TOKEN nao configurado" }
   }
 
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const ownerOk = await assertProfessorOwnsClassroom(supabase, classroomId, user.id)
+  const ownerOk = await assertProfessorOwnsClassroom(classroomId, user.id)
   if (!ownerOk) return { ok: false, error: "Sala nao encontrada" }
 
   const raw = formData.get("file")
@@ -728,17 +597,12 @@ export async function uploadClassroomCover(
     }
   }
 
-  const { data: row, error: fetchErr } = await supabase
-    .from("classrooms")
-    .select("cover_image_pathname")
-    .eq("id", classroomId)
-    .eq("professor_id", user.id)
-    .maybeSingle()
-
-  if (fetchErr || !row) return { ok: false, error: "Sala nao encontrada" }
-
-  const previousPathname =
-    typeof row.cover_image_pathname === "string" ? row.cover_image_pathname : null
+  const row = await queryOne<{ cover_image_pathname: string | null }>(
+    "select cover_image_pathname from public.classrooms where id = $1 and professor_id = $2",
+    [classroomId, user.id]
+  )
+  if (!row) return { ok: false, error: "Sala nao encontrada" }
+  const previousPathname = row.cover_image_pathname ?? null
 
   const safe = safeUploadFilename(raw.name)
   const pathname = `classroom-mural/${classroomId}/cover-${randomUUID()}-${safe}`
@@ -755,15 +619,14 @@ export async function uploadClassroomCover(
     return { ok: false, error: msg }
   }
 
-  const { error: updateErr } = await supabase
-    .from("classrooms")
-    .update({ cover_image_pathname: pathname })
-    .eq("id", classroomId)
-    .eq("professor_id", user.id)
-
-  if (updateErr) {
+  try {
+    await query(
+      "update public.classrooms set cover_image_pathname = $1 where id = $2 and professor_id = $3",
+      [pathname, classroomId, user.id]
+    )
+  } catch (e: any) {
     await del(pathname, { token }).catch(() => {})
-    return { ok: false, error: updateErr.message }
+    return { ok: false, error: e?.message ?? "Erro ao salvar capa" }
   }
 
   if (previousPathname) {
@@ -782,35 +645,28 @@ export async function removeClassroomCover(
     return { ok: false, error: "BLOB_READ_WRITE_TOKEN nao configurado" }
   }
 
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const ownerOk = await assertProfessorOwnsClassroom(supabase, classroomId, user.id)
+  const ownerOk = await assertProfessorOwnsClassroom(classroomId, user.id)
   if (!ownerOk) return { ok: false, error: "Sala nao encontrada" }
 
-  const { data: row, error: fetchErr } = await supabase
-    .from("classrooms")
-    .select("cover_image_pathname")
-    .eq("id", classroomId)
-    .eq("professor_id", user.id)
-    .maybeSingle()
-
-  if (fetchErr || !row) return { ok: false, error: "Sala nao encontrada" }
-
-  const pathname =
-    typeof row.cover_image_pathname === "string" ? row.cover_image_pathname : null
+  const row = await queryOne<{ cover_image_pathname: string | null }>(
+    "select cover_image_pathname from public.classrooms where id = $1 and professor_id = $2",
+    [classroomId, user.id]
+  )
+  if (!row) return { ok: false, error: "Sala nao encontrada" }
+  const pathname = row.cover_image_pathname ?? null
   if (!pathname) return { ok: true }
 
-  const { error: updateErr } = await supabase
-    .from("classrooms")
-    .update({ cover_image_pathname: null })
-    .eq("id", classroomId)
-    .eq("professor_id", user.id)
-
-  if (updateErr) return { ok: false, error: updateErr.message }
+  try {
+    await query(
+      "update public.classrooms set cover_image_pathname = null where id = $1 and professor_id = $2",
+      [classroomId, user.id]
+    )
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao remover capa" }
+  }
 
   await del(pathname, { token }).catch(() => {})
   revalidateClassroomMuralPaths(classroomId)
@@ -818,19 +674,17 @@ export async function removeClassroomCover(
 }
 
 export async function leaveClassroom(classroomId: string): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const { error } = await supabase
-    .from("classroom_members")
-    .delete()
-    .eq("classroom_id", classroomId)
-    .eq("student_id", user.id)
-
-  if (error) return { ok: false, error: error.message }
+  try {
+    await query("delete from public.classroom_members where classroom_id = $1 and student_id = $2", [
+      classroomId,
+      user.id,
+    ])
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao sair da sala" }
+  }
   revalidatePath("/dashboard/aluno/salas")
   return { ok: true }
 }

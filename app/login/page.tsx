@@ -4,11 +4,11 @@ import { useState, Suspense } from "react"
 import { useSearchParams } from "next/navigation"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
+import { signIn } from "next-auth/react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { GraduationCap, Eye, EyeOff, Mail, Lock, ArrowRight, AlertCircle } from "lucide-react"
-import { createClient } from "@/lib/supabase/client"
 
 function safeInternalPath(next: string | null): string | null {
   if (!next || !next.startsWith("/") || next.startsWith("//")) return null
@@ -30,42 +30,22 @@ function LoginForm() {
     e.preventDefault()
     setIsLoading(true)
     setError(null)
-    
-    const supabase = createClient()
-    
-    const { data, error: signInError } = await supabase.auth.signInWithPassword({
+
+    const next = safeInternalPath(searchParams.get("next")) ?? undefined
+    const res = await signIn("credentials", {
+      redirect: false,
       email: formData.email,
       password: formData.password,
     })
-    
-    if (signInError) {
-      setError(signInError.message === "Invalid login credentials" 
-        ? "E-mail ou senha incorretos" 
-        : signInError.message
-      )
+
+    if (!res?.ok) {
+      setError("E-mail ou senha incorretos")
       setIsLoading(false)
       return
     }
-    
-    if (data.user) {
-      // Get user profile to determine type
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("user_type")
-        .eq("id", data.user.id)
-        .single()
-      
-      const next = safeInternalPath(searchParams.get("next"))
 
-      if (profile?.user_type === "professor") {
-        router.push("/dashboard/professor")
-      } else if (profile?.user_type === "aluno" && next?.startsWith("/entrar")) {
-        router.push(next)
-      } else {
-        router.push("/dashboard/aluno")
-      }
-      router.refresh()
-    }
+    router.push(next ?? "/dashboard/aluno")
+    router.refresh()
   }
 
   return (

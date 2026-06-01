@@ -3,7 +3,8 @@
 import { del, put } from "@vercel/blob"
 import { randomUUID } from "crypto"
 import { revalidatePath } from "next/cache"
-import { createClient } from "@/lib/supabase/server"
+import { requireAuthedUser } from "@/lib/auth/user"
+import { query, queryOne } from "@/lib/db/query"
 import type {
   ActivityAttachment,
 } from "@/lib/activities/attachments"
@@ -30,6 +31,20 @@ import type {
 } from "@/lib/activities/types"
 
 const TRIX_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+
+function asRecord(v: unknown): Record<string, unknown> {
+  if (!v) return {}
+  if (typeof v === "object") return v as Record<string, unknown>
+  if (typeof v === "string") {
+    try {
+      const parsed = JSON.parse(v)
+      return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {}
+    } catch {
+      return {}
+    }
+  }
+  return {}
+}
 
 export type CreateActivityInput = {
   classroomId: string
@@ -60,17 +75,14 @@ export type UpdateActivityInput = {
 }
 
 async function assertProfessorOwnsClassroom(
-  supabase: Awaited<ReturnType<typeof createClient>>,
   classroomId: string,
   userId: string
 ): Promise<boolean> {
-  const { data } = await supabase
-    .from("classrooms")
-    .select("id")
-    .eq("id", classroomId)
-    .eq("professor_id", userId)
-    .maybeSingle()
-  return !!data
+  const row = await queryOne<{ id: string }>(
+    "select id from public.classrooms where id = $1 and professor_id = $2",
+    [classroomId, userId]
+  )
+  return !!row
 }
 
 async function deleteAttachmentBlobs(urls: string[]) {
@@ -88,13 +100,10 @@ export async function uploadActivityAttachmentFiles(
     return { ok: false, error: "BLOB_READ_WRITE_TOKEN nao configurado" }
   }
 
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const ok = await assertProfessorOwnsClassroom(supabase, classroomId, user.id)
+  const ok = await assertProfessorOwnsClassroom(classroomId, user.id)
   if (!ok) return { ok: false, error: "Sala nao encontrada" }
 
   const raw = formData.getAll("files")
@@ -157,82 +166,68 @@ export async function uploadActivityAttachmentFiles(
 export async function listActivitiesForClassroomAsProfessor(
   classroomId: string
 ): Promise<{ rows: ClassroomActivityRow[]; error: string | null }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { rows: [], error: "Nao autenticado" }
 
-  const ok = await assertProfessorOwnsClassroom(supabase, classroomId, user.id)
+  const ok = await assertProfessorOwnsClassroom(classroomId, user.id)
   if (!ok) return { rows: [], error: "Sala nao encontrada" }
 
-  const { data, error } = await supabase
-    .from("classroom_activities")
-    .select("*")
-    .eq("classroom_id", classroomId)
-    .order("due_at", { ascending: true, nullsFirst: false })
-
-  if (error) return { rows: [], error: error.message }
-  return { rows: (data ?? []) as ClassroomActivityRow[], error: null }
+  try {
+    const data = await query<ClassroomActivityRow>(
+      "select * from public.classroom_activities where classroom_id = $1 order by due_at asc nulls last",
+      [classroomId]
+    )
+    return { rows: data ?? [], error: null }
+  } catch (e: any) {
+    return { rows: [], error: e?.message ?? "Erro ao listar atividades" }
+  }
 }
 
 export async function listActivitiesForClassroomAsStudent(
   classroomId: string
 ): Promise<{ rows: ClassroomActivityRow[]; error: string | null }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { rows: [], error: "Nao autenticado" }
 
-  const { data: member } = await supabase
-    .from("classroom_members")
-    .select("id")
-    .eq("classroom_id", classroomId)
-    .eq("student_id", user.id)
-    .maybeSingle()
+  const member = await queryOne<{ id: string }>(
+    "select id from public.classroom_members where classroom_id = $1 and student_id = $2",
+    [classroomId, user.id]
+  )
 
   if (!member) return { rows: [], error: "Voce nao participa desta sala" }
 
-  const { data, error } = await supabase
-    .from("classroom_activities")
-    .select("*")
-    .eq("classroom_id", classroomId)
-    .order("due_at", { ascending: true, nullsFirst: false })
-
-  if (error) return { rows: [], error: error.message }
-  return { rows: (data ?? []) as ClassroomActivityRow[], error: null }
+  // Student cannot see drafts.
+  try {
+    const data = await query<ClassroomActivityRow>(
+      "select * from public.classroom_activities where classroom_id = $1 and status <> 'rascunho' order by due_at asc nulls last",
+      [classroomId]
+    )
+    return { rows: data ?? [], error: null }
+  } catch (e: any) {
+    return { rows: [], error: e?.message ?? "Erro ao listar atividades" }
+  }
 }
 
 export async function getActivityForStudent(
   classroomId: string,
   activityId: string
 ): Promise<{ row: ClassroomActivityRow | null; error: string | null }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { row: null, error: "Nao autenticado" }
 
-  const { data: member } = await supabase
-    .from("classroom_members")
-    .select("id")
-    .eq("classroom_id", classroomId)
-    .eq("student_id", user.id)
-    .maybeSingle()
+  const member = await queryOne<{ id: string }>(
+    "select id from public.classroom_members where classroom_id = $1 and student_id = $2",
+    [classroomId, user.id]
+  )
 
   if (!member) return { row: null, error: "Voce nao participa desta sala" }
 
-  const { data, error } = await supabase
-    .from("classroom_activities")
-    .select("*")
-    .eq("id", activityId)
-    .eq("classroom_id", classroomId)
-    .maybeSingle()
-
-  if (error) return { row: null, error: error.message }
+  const data = await queryOne<ClassroomActivityRow>(
+    "select * from public.classroom_activities where id = $1 and classroom_id = $2",
+    [activityId, classroomId]
+  )
   if (!data) return { row: null, error: null }
-  const row = data as ClassroomActivityRow
+  const row = data
   if (row.status === "rascunho") return { row: null, error: null }
   return { row, error: null }
 }
@@ -250,13 +245,10 @@ export async function uploadTrixActivityImage(
     return { ok: false, error: "BLOB_READ_WRITE_TOKEN nao configurado" }
   }
 
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const ok = await assertProfessorOwnsClassroom(supabase, classroomId, user.id)
+  const ok = await assertProfessorOwnsClassroom(classroomId, user.id)
   if (!ok) return { ok: false, error: "Sala nao encontrada" }
 
   const file = formData.get("file")
@@ -297,16 +289,13 @@ export async function uploadTrixActivityImage(
 export async function createActivity(
   input: CreateActivityInput
 ): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
   const title = input.title.trim()
   if (!title) return { ok: false, error: "Titulo obrigatorio" }
 
-  const ok = await assertProfessorOwnsClassroom(supabase, input.classroomId, user.id)
+  const ok = await assertProfessorOwnsClassroom(input.classroomId, user.id)
   if (!ok) return { ok: false, error: "Sala nao encontrada" }
 
   const attachments = input.attachments ?? []
@@ -339,23 +328,29 @@ export async function createActivity(
     maxScore = totalExamPoints(input.exam)
   }
 
-  const { data, error } = await supabase
-    .from("classroom_activities")
-    .insert({
-      classroom_id: input.classroomId,
-      type: input.type,
-      title,
-      description: descriptionHtml || null,
-      starts_at: input.startsAt || null,
-      due_at: input.dueAt || null,
-      max_score: maxScore,
-      status: input.status,
-      settings,
-    })
-    .select("id")
-    .single()
-
-  if (error || !data) return { ok: false, error: error?.message ?? "Erro ao criar" }
+  let data: { id: string } | null = null
+  try {
+    data = await queryOne<{ id: string }>(
+      `insert into public.classroom_activities
+        (classroom_id, type, title, description, starts_at, due_at, max_score, status, settings)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
+       returning id`,
+      [
+        input.classroomId,
+        input.type,
+        title,
+        descriptionHtml || null,
+        input.startsAt || null,
+        input.dueAt || null,
+        maxScore,
+        input.status,
+        JSON.stringify(settings),
+      ]
+    )
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao criar" }
+  }
+  if (!data) return { ok: false, error: "Erro ao criar" }
   revalidatePath(`/dashboard/professor/salas/${input.classroomId}`)
   revalidatePath(`/dashboard/aluno/salas/${input.classroomId}`)
   revalidatePath(
@@ -367,13 +362,10 @@ export async function createActivity(
 export async function updateActivity(
   input: UpdateActivityInput
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const ok = await assertProfessorOwnsClassroom(supabase, input.classroomId, user.id)
+  const ok = await assertProfessorOwnsClassroom(input.classroomId, user.id)
   if (!ok) return { ok: false, error: "Sala nao encontrada" }
 
   const patch: Record<string, unknown> = {}
@@ -409,15 +401,13 @@ export async function updateActivity(
       if (attachErr) return { ok: false, error: attachErr }
     }
 
-    const { data: row } = await supabase
-      .from("classroom_activities")
-      .select("settings")
-      .eq("id", input.id)
-      .eq("classroom_id", input.classroomId)
-      .maybeSingle()
+    const row = await queryOne<{ settings: any }>(
+      "select settings from public.classroom_activities where id = $1 and classroom_id = $2",
+      [input.id, input.classroomId]
+    )
 
     const old = parseActivityAttachments(
-      row?.settings as Record<string, unknown> | undefined
+      asRecord(row?.settings)
     )
     if (input.attachments !== undefined) {
       const newUrls = new Set(input.attachments.map((a) => a.url))
@@ -425,7 +415,7 @@ export async function updateActivity(
       await deleteAttachmentBlobs(removedUrls)
     }
 
-    const current = (row?.settings as Record<string, unknown>) ?? {}
+    const current = asRecord(row?.settings)
     const settingsPatch: {
       attachments?: ActivityAttachment[]
       exam?: ActivityExamDefinition | null
@@ -449,13 +439,28 @@ export async function updateActivity(
 
   if (Object.keys(patch).length === 0) return { ok: true }
 
-  const { error } = await supabase
-    .from("classroom_activities")
-    .update(patch)
-    .eq("id", input.id)
-    .eq("classroom_id", input.classroomId)
-
-  if (error) return { ok: false, error: error.message }
+  const sets: string[] = []
+  const values: any[] = []
+  let i = 1
+  for (const [k, v] of Object.entries(patch)) {
+    if (k === "settings") {
+      sets.push(`${k} = $${i}::jsonb`)
+      values.push(JSON.stringify(v))
+    } else {
+      sets.push(`${k} = $${i}`)
+      values.push(v)
+    }
+    i++
+  }
+  values.push(input.id, input.classroomId)
+  try {
+    await query(
+      `update public.classroom_activities set ${sets.join(", ")} where id = $${i} and classroom_id = $${i + 1}`,
+      values
+    )
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao atualizar" }
+  }
   revalidatePath(`/dashboard/professor/salas/${input.classroomId}`)
   revalidatePath(`/dashboard/aluno/salas/${input.classroomId}`)
   revalidatePath(
@@ -468,34 +473,30 @@ export async function deleteActivity(
   activityId: string,
   classroomId: string
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const ok = await assertProfessorOwnsClassroom(supabase, classroomId, user.id)
+  const ok = await assertProfessorOwnsClassroom(classroomId, user.id)
   if (!ok) return { ok: false, error: "Sala nao encontrada" }
 
-  const { data: existing } = await supabase
-    .from("classroom_activities")
-    .select("settings")
-    .eq("id", activityId)
-    .eq("classroom_id", classroomId)
-    .maybeSingle()
+  const existing = await queryOne<{ settings: any }>(
+    "select settings from public.classroom_activities where id = $1 and classroom_id = $2",
+    [activityId, classroomId]
+  )
 
   const urls = parseActivityAttachments(
-    existing?.settings as Record<string, unknown> | undefined
+    asRecord(existing?.settings)
   ).map((a) => a.url)
   await deleteAttachmentBlobs(urls)
 
-  const { error } = await supabase
-    .from("classroom_activities")
-    .delete()
-    .eq("id", activityId)
-    .eq("classroom_id", classroomId)
-
-  if (error) return { ok: false, error: error.message }
+  try {
+    await query("delete from public.classroom_activities where id = $1 and classroom_id = $2", [
+      activityId,
+      classroomId,
+    ])
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao excluir" }
+  }
   revalidatePath(`/dashboard/professor/salas/${classroomId}`)
   revalidatePath(`/dashboard/aluno/salas/${classroomId}`)
   return { ok: true }

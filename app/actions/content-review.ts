@@ -1,7 +1,8 @@
 "use server"
 
 import { revalidatePath } from "next/cache"
-import { createClient } from "@/lib/supabase/server"
+import { requireAuthedUser } from "@/lib/auth/user"
+import { query, queryOne } from "@/lib/db/query"
 import type {
   ContentItemStatus,
   ContentItemType,
@@ -23,53 +24,53 @@ export type ReviewedContentItem = {
 }
 
 export async function listMyReviewedContent(): Promise<ReviewedContentItem[]> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return []
-
-  const { data } = await supabase
-    .from("content_items")
-    .select(
-      "id, title, type, status, content_review_results(score, seal, findings, warning_reason, reviewed_at)"
-    )
-    .eq("author_id", user.id)
-    .not("content_review_results", "is", null)
-    .order("updated_at", { ascending: false })
-
-  if (!data) return []
 
   type Row = {
     id: string
     title: string
     type: string
     status: string
-    content_review_results: Array<{
-      score: number
-      seal: string
-      findings: unknown
-      warning_reason: string | null
-      reviewed_at: string
-    }> | null
+    score: number
+    seal: string
+    findings: unknown
+    warning_reason: string | null
+    reviewed_at: string
   }
 
+  const rows = await query<Row>(
+    `select
+       ci.id,
+       ci.title,
+       ci.type,
+       ci.status,
+       crr.score,
+       crr.seal,
+       crr.findings,
+       crr.warning_reason,
+       crr.reviewed_at
+     from public.content_items ci
+     inner join public.content_review_results crr on crr.content_item_id = ci.id
+     where ci.author_id = $1
+     order by ci.updated_at desc`,
+    [user.id]
+  )
+
   const items: ReviewedContentItem[] = []
-  for (const row of data as Row[]) {
-    const rev = Array.isArray(row.content_review_results)
-      ? row.content_review_results[0] ?? null
-      : null
-    if (!rev) continue
+  for (const r of rows ?? []) {
     items.push({
-      id: row.id,
-      title: row.title,
-      type: row.type as ContentItemType,
-      status: row.status as ContentItemStatus,
-      score: rev.score,
-      seal: rev.seal as ContentReviewSeal,
-      findings: Array.isArray(rev.findings) ? (rev.findings as ContentReviewFinding[]) : [],
-      warningReason: rev.warning_reason,
-      reviewedAt: rev.reviewed_at,
+      id: r.id,
+      title: r.title,
+      type: r.type as ContentItemType,
+      status: r.status as ContentItemStatus,
+      score: Number(r.score ?? 0),
+      seal: r.seal as ContentReviewSeal,
+      findings: Array.isArray(r.findings)
+        ? (r.findings as ContentReviewFinding[])
+        : [],
+      warningReason: r.warning_reason,
+      reviewedAt: r.reviewed_at,
     })
   }
 
@@ -80,30 +81,44 @@ export async function listMyReviewedContent(): Promise<ReviewedContentItem[]> {
 export async function getMyContentReview(
   contentItemId: string
 ): Promise<ContentReviewResult | null> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return null
 
-  const { data } = await supabase
-    .from("content_review_results")
-    .select(
-      "id, content_item_id, score, seal, findings, warning_reason, reviewed_at"
-    )
-    .eq("content_item_id", contentItemId)
-    .maybeSingle()
+  type Row = {
+    id: string
+    content_item_id: string
+    score: number
+    seal: string
+    findings: unknown
+    warning_reason: string | null
+    reviewed_at: string
+  }
 
-  if (!data) return null
+  const row = await queryOne<Row>(
+    `select
+       crr.id,
+       crr.content_item_id,
+       crr.score,
+       crr.seal,
+       crr.findings,
+       crr.warning_reason,
+       crr.reviewed_at
+     from public.content_review_results crr
+     inner join public.content_items ci on ci.id = crr.content_item_id
+     where crr.content_item_id = $1
+       and ci.author_id = $2`,
+    [contentItemId, user.id]
+  )
 
+  if (!row) return null
   return {
-    id: data.id,
-    contentItemId: data.content_item_id,
-    score: data.score,
-    seal: data.seal,
-    findings: Array.isArray(data.findings) ? data.findings : [],
-    warningReason: data.warning_reason ?? null,
-    reviewedAt: data.reviewed_at,
+    id: row.id,
+    contentItemId: row.content_item_id,
+    score: Number(row.score ?? 0),
+    seal: row.seal as ContentReviewSeal,
+    findings: Array.isArray(row.findings) ? row.findings : [],
+    warningReason: row.warning_reason ?? null,
+    reviewedAt: row.reviewed_at,
   }
 }
 
@@ -116,41 +131,40 @@ export async function professorDecideAfterReview(
   contentItemId: string,
   decision: "publish" | "revise"
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const { data: item } = await supabase
-    .from("content_items")
-    .select("id, author_id, status, published_at")
-    .eq("id", contentItemId)
-    .eq("author_id", user.id)
-    .eq("status", "aguardando_decisao")
-    .maybeSingle()
+  type ItemRow = { id: string; published_at: string | null }
+  const item = await queryOne<ItemRow>(
+    `select id, published_at
+     from public.content_items
+     where id = $1 and author_id = $2 and status = 'aguardando_decisao'`,
+    [contentItemId, user.id]
+  )
 
   if (!item) {
     return { ok: false, error: "Artigo nao encontrado ou nao aguarda decisao" }
   }
 
-  if (decision === "publish") {
-    const publishedAt = item.published_at ?? new Date().toISOString()
-    const { error } = await supabase
-      .from("content_items")
-      .update({ status: "published", published_at: publishedAt })
-      .eq("id", contentItemId)
-      .eq("author_id", user.id)
-
-    if (error) return { ok: false, error: error.message }
-  } else {
-    const { error } = await supabase
-      .from("content_items")
-      .update({ status: "draft" })
-      .eq("id", contentItemId)
-      .eq("author_id", user.id)
-
-    if (error) return { ok: false, error: error.message }
+  try {
+    if (decision === "publish") {
+      const publishedAt = item.published_at ?? new Date().toISOString()
+      await query(
+        `update public.content_items
+         set status = 'published', published_at = $3
+         where id = $1 and author_id = $2`,
+        [contentItemId, user.id, publishedAt]
+      )
+    } else {
+      await query(
+        `update public.content_items
+         set status = 'draft'
+         where id = $1 and author_id = $2`,
+        [contentItemId, user.id]
+      )
+    }
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro" }
   }
 
   revalidatePath("/dashboard/professor")

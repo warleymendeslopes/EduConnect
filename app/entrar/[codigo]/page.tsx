@@ -2,7 +2,8 @@ import Link from "next/link"
 import { GraduationCap } from "lucide-react"
 import { notFound } from "next/navigation"
 import { getClassroomPreviewByInviteCode } from "@/app/actions/classrooms"
-import { createClient } from "@/lib/supabase/server"
+import { getAuthedUser } from "@/lib/auth/user"
+import { queryOne } from "@/lib/db/query"
 import { EntrarActions } from "./entrar-actions"
 
 export default async function EntrarConvitePage({
@@ -26,20 +27,16 @@ export default async function EntrarConvitePage({
     notFound()
   }
 
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await getAuthedUser()
 
   let userType: "aluno" | "professor" | null = null
   if (user) {
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("user_type")
-      .eq("id", user.id)
-      .single()
+    const profile = await queryOne<{ user_type: string }>(
+      "select user_type from public.profiles where id = $1",
+      [user.id]
+    )
     if (profile?.user_type === "aluno" || profile?.user_type === "professor") {
-      userType = profile.user_type
+      userType = profile.user_type as any
     }
   }
 

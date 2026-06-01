@@ -1,4 +1,4 @@
-import { createClient } from "@supabase/supabase-js"
+import { query, queryOne } from "@/lib/db/query"
 import type { ContentReviewFinding } from "./types"
 
 const XAI_API_URL = "https://api.x.ai/v1/chat/completions"
@@ -83,17 +83,10 @@ function parseReview(raw: XaiRawReview): {
 }
 
 export async function runArticleReview(contentItemId: string): Promise<void> {
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  const item = await queryOne<{ id: string; title: string; body_html: string | null }>(
+    "select id, title, body_html from public.content_items where id = $1 and status = 'verificando'",
+    [contentItemId]
   )
-
-  const { data: item } = await supabase
-    .from("content_items")
-    .select("id, title, body_html")
-    .eq("id", contentItemId)
-    .eq("status", "verificando")
-    .maybeSingle()
 
   if (!item) return
 
@@ -137,10 +130,10 @@ export async function runArticleReview(contentItemId: string): Promise<void> {
   } catch (err) {
     console.error("[review-agent] Erro ao chamar xAI:", err)
     // Falha técnica: devolve para rascunho para o professor tentar novamente
-    await supabase
-      .from("content_items")
-      .update({ status: "draft" })
-      .eq("id", contentItemId)
+    await query(
+      "update public.content_items set status = 'draft' where id = $1",
+      [contentItemId]
+    ).catch(() => {})
     return
   }
 
@@ -148,16 +141,25 @@ export async function runArticleReview(contentItemId: string): Promise<void> {
   const newStatus =
     score < 50 ? "revisao" : score <= 80 ? "aguardando_decisao" : "published"
 
-  await supabase.from("content_review_results").upsert(
-    {
-      content_item_id: contentItemId,
+  await query(
+    `insert into public.content_review_results
+       (content_item_id, score, seal, findings, warning_reason, reviewed_at)
+     values ($1, $2, $3, $4::jsonb, $5, $6)
+     on conflict (content_item_id)
+     do update set
+       score = excluded.score,
+       seal = excluded.seal,
+       findings = excluded.findings,
+       warning_reason = excluded.warning_reason,
+       reviewed_at = excluded.reviewed_at`,
+    [
+      contentItemId,
       score,
       seal,
-      findings,
-      warning_reason: warningReason,
-      reviewed_at: new Date().toISOString(),
-    },
-    { onConflict: "content_item_id" }
+      JSON.stringify(findings ?? []),
+      warningReason,
+      new Date().toISOString(),
+    ]
   )
 
   const statusPatch: Record<string, unknown> = { status: newStatus }
@@ -165,8 +167,11 @@ export async function runArticleReview(contentItemId: string): Promise<void> {
     statusPatch.published_at = new Date().toISOString()
   }
 
-  await supabase
-    .from("content_items")
-    .update(statusPatch)
-    .eq("id", contentItemId)
+  await query(
+    `update public.content_items
+     set status = $2,
+         published_at = coalesce($3, published_at)
+     where id = $1`,
+    [contentItemId, newStatus, (statusPatch as any).published_at ?? null]
+  )
 }

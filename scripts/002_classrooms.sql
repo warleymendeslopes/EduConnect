@@ -1,6 +1,6 @@
 -- Salas de aula e matrículas (EduConnect)
 -- Ordem: aplicar scripts/001_create_profiles.sql primeiro (uma vez por projeto).
--- Este ficheiro: Supabase → SQL Editor → colar tudo e Run.
+-- Este ficheiro: execute no seu Postgres (psql/console do provedor).
 -- Se ja existir schema antigo em conflito, apague antes classroom_members, classrooms
 -- e as funcoes/politicas deste modulo, ou use um projeto limpo.
 

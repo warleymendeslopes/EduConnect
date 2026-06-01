@@ -16,7 +16,7 @@ import {
   totalExamPoints,
 } from "@/lib/activities/exam"
 import { computeAssessmentBlockMessageForStudent } from "@/lib/content/assessment-settings"
-import { createClient } from "@/lib/supabase/server"
+import { getAuthedUser } from "@/lib/auth/user"
 import type { Metadata } from "next"
 import Link from "next/link"
 import { notFound } from "next/navigation"
@@ -174,10 +174,7 @@ export default async function ConteudoPublicoPage({ params }: Props) {
     )
   }
 
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await getAuthedUser()
 
   if (item.type === "article") {
     return (

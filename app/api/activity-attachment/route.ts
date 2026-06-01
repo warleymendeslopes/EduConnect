@@ -1,6 +1,7 @@
 import { get } from "@vercel/blob"
 import { NextRequest, NextResponse } from "next/server"
-import { createClient } from "@/lib/supabase/server"
+import { getAuthedUser } from "@/lib/auth/user"
+import { queryOne } from "@/lib/db/query"
 
 export const runtime = "nodejs"
 
@@ -35,19 +36,15 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Invalid pathname" }, { status: 400 })
   }
 
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await getAuthedUser()
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
-  const { data: room } = await supabase
-    .from("classrooms")
-    .select("professor_id")
-    .eq("id", classroomId)
-    .maybeSingle()
+  const room = await queryOne<{ professor_id: string }>(
+    "select professor_id from public.classrooms where id = $1",
+    [classroomId]
+  )
 
   if (!room) {
     return NextResponse.json({ error: "Not found" }, { status: 404 })
@@ -55,12 +52,10 @@ export async function GET(request: NextRequest) {
 
   const isProfessor = room.professor_id === user.id
   if (!isProfessor) {
-    const { data: member } = await supabase
-      .from("classroom_members")
-      .select("id")
-      .eq("classroom_id", classroomId)
-      .eq("student_id", user.id)
-      .maybeSingle()
+    const member = await queryOne<{ id: string }>(
+      "select id from public.classroom_members where classroom_id = $1 and student_id = $2",
+      [classroomId, user.id]
+    )
     if (!member) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 })
     }

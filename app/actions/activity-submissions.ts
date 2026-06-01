@@ -1,7 +1,8 @@
 "use server"
 
 import { revalidatePath } from "next/cache"
-import { createClient } from "@/lib/supabase/server"
+import { requireAuthedUser } from "@/lib/auth/user"
+import { query, queryOne } from "@/lib/db/query"
 import {
   type ActivityExamDefinition,
   type ActivityExamPublic,
@@ -26,6 +27,20 @@ export type ActivitySubmissionRow = {
   submitted_at: string | null
   created_at: string
   updated_at: string
+}
+
+function asRecord(v: unknown): Record<string, unknown> {
+  if (!v) return {}
+  if (typeof v === "object") return v as Record<string, unknown>
+  if (typeof v === "string") {
+    try {
+      const parsed = JSON.parse(v)
+      return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {}
+    } catch {
+      return {}
+    }
+  }
+  return {}
 }
 
 function parseOpenScores(raw: unknown): Record<string, number> {
@@ -61,31 +76,25 @@ function mapSubmissionRow(data: Record<string, unknown>): ActivitySubmissionRow 
 }
 
 async function assertStudentMember(
-  supabase: Awaited<ReturnType<typeof createClient>>,
   classroomId: string,
   userId: string
 ): Promise<boolean> {
-  const { data } = await supabase
-    .from("classroom_members")
-    .select("id")
-    .eq("classroom_id", classroomId)
-    .eq("student_id", userId)
-    .maybeSingle()
-  return !!data
+  const row = await queryOne<{ id: string }>(
+    "select id from public.classroom_members where classroom_id = $1 and student_id = $2",
+    [classroomId, userId]
+  )
+  return !!row
 }
 
 async function assertProfessorOwnsClassroom(
-  supabase: Awaited<ReturnType<typeof createClient>>,
   classroomId: string,
   userId: string
 ): Promise<boolean> {
-  const { data } = await supabase
-    .from("classrooms")
-    .select("id")
-    .eq("id", classroomId)
-    .eq("professor_id", userId)
-    .maybeSingle()
-  return !!data
+  const row = await queryOne<{ id: string }>(
+    "select id from public.classrooms where id = $1 and professor_id = $2",
+    [classroomId, userId]
+  )
+  return !!row
 }
 
 function revalidateActivityPaths(classroomId: string, activityId: string) {
@@ -104,31 +113,27 @@ export type StudentSubmissionGrade = {
 export async function getMySubmissionGradesForClassroom(
   classroomId: string
 ): Promise<{ byActivity: Record<string, StudentSubmissionGrade>; error: string | null }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { byActivity: {}, error: "Nao autenticado" }
 
-  const member = await assertStudentMember(supabase, classroomId, user.id)
+  const member = await assertStudentMember(classroomId, user.id)
   if (!member) return { byActivity: {}, error: "Voce nao participa desta sala" }
 
-  const { data: acts, error: e1 } = await supabase
-    .from("classroom_activities")
-    .select("id")
-    .eq("classroom_id", classroomId)
-
-  if (e1) return { byActivity: {}, error: e1.message }
-  const activityIds = (acts ?? []).map((a) => a.id as string)
+  const acts = await query<{ id: string }>(
+    "select id from public.classroom_activities where classroom_id = $1",
+    [classroomId]
+  ).catch((e: any) => {
+    throw e
+  })
+  const activityIds = (acts ?? []).map((a) => a.id)
   if (activityIds.length === 0) return { byActivity: {}, error: null }
 
-  const { data: subs, error: e2 } = await supabase
-    .from("classroom_activity_submissions")
-    .select("activity_id, status, score_total, score_mcq")
-    .eq("student_id", user.id)
-    .in("activity_id", activityIds)
-
-  if (e2) return { byActivity: {}, error: e2.message }
+  const subs = await query<{ activity_id: string; status: string; score_total: number | null; score_mcq: number }>(
+    "select activity_id, status, score_total, score_mcq from public.classroom_activity_submissions where student_id = $1 and activity_id = any($2::uuid[])",
+    [user.id, activityIds]
+  ).catch((e: any) => {
+    throw e
+  })
 
   const byActivity: Record<string, StudentSubmissionGrade> = {}
   for (const row of subs ?? []) {
@@ -154,29 +159,22 @@ export async function getExamForStudent(
   | { ok: true; exam: ActivityExamPublic }
   | { ok: false; error: string }
 > {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const member = await assertStudentMember(supabase, classroomId, user.id)
+  const member = await assertStudentMember(classroomId, user.id)
   if (!member) return { ok: false, error: "Voce nao participa desta sala" }
 
-  const { data, error } = await supabase
-    .from("classroom_activities")
-    .select("settings, status")
-    .eq("id", activityId)
-    .eq("classroom_id", classroomId)
-    .maybeSingle()
-
-  if (error) return { ok: false, error: error.message }
+  const data = await queryOne<{ settings: any; status: string }>(
+    "select settings, status from public.classroom_activities where id = $1 and classroom_id = $2",
+    [activityId, classroomId]
+  )
   if (!data || data.status === "rascunho") {
     return { ok: false, error: "Atividade nao encontrada" }
   }
 
   const exam = parseExamFromSettings(
-    data.settings as Record<string, unknown> | undefined
+    asRecord(data.settings)
   )
   if (!exam) return { ok: false, error: "Esta atividade nao tem questoes" }
   const err = validateExamDefinition(exam)
@@ -191,25 +189,18 @@ export async function getMySubmission(
   submission: ActivitySubmissionRow | null
   error: string | null
 }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { submission: null, error: "Nao autenticado" }
 
-  const member = await assertStudentMember(supabase, classroomId, user.id)
+  const member = await assertStudentMember(classroomId, user.id)
   if (!member) return { submission: null, error: "Voce nao participa desta sala" }
 
-  const { data, error } = await supabase
-    .from("classroom_activity_submissions")
-    .select("*")
-    .eq("activity_id", activityId)
-    .eq("student_id", user.id)
-    .maybeSingle()
-
-  if (error) return { submission: null, error: error.message }
+  const data = await queryOne<Record<string, unknown>>(
+    "select * from public.classroom_activity_submissions where activity_id = $1 and student_id = $2",
+    [activityId, user.id]
+  )
   if (!data) return { submission: null, error: null }
-  return { submission: mapSubmissionRow(data as Record<string, unknown>), error: null }
+  return { submission: mapSubmissionRow(data), error: null }
 }
 
 export async function saveSubmissionDraft(
@@ -217,29 +208,23 @@ export async function saveSubmissionDraft(
   activityId: string,
   answers: StudentExamAnswers
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const member = await assertStudentMember(supabase, classroomId, user.id)
+  const member = await assertStudentMember(classroomId, user.id)
   if (!member) return { ok: false, error: "Voce nao participa desta sala" }
 
-  const { data: act, error: actErr } = await supabase
-    .from("classroom_activities")
-    .select("id, status, settings")
-    .eq("id", activityId)
-    .eq("classroom_id", classroomId)
-    .maybeSingle()
-
-  if (actErr || !act) return { ok: false, error: "Atividade nao encontrada" }
+  const act = await queryOne<{ id: string; status: string; settings: any }>(
+    "select id, status, settings from public.classroom_activities where id = $1 and classroom_id = $2",
+    [activityId, classroomId]
+  )
+  if (!act) return { ok: false, error: "Atividade nao encontrada" }
   if (act.status === "rascunho") return { ok: false, error: "Atividade indisponivel" }
   if (act.status === "encerrada") {
     return { ok: false, error: "Atividade encerrada" }
   }
 
-  const exam = parseExamFromSettings(act.settings as Record<string, unknown>)
+  const exam = parseExamFromSettings(asRecord(act.settings))
   if (!exam) return { ok: false, error: "Sem questoes nesta atividade" }
 
   const sanitized: StudentExamAnswers = {}
@@ -257,36 +242,33 @@ export async function saveSubmissionDraft(
     }
   }
 
-  const { data: existing } = await supabase
-    .from("classroom_activity_submissions")
-    .select("id, status")
-    .eq("activity_id", activityId)
-    .eq("student_id", user.id)
-    .maybeSingle()
+  const existing = await queryOne<{ id: string; status: string }>(
+    "select id, status from public.classroom_activity_submissions where activity_id = $1 and student_id = $2",
+    [activityId, user.id]
+  )
 
   if (existing?.status === "enviado") {
     return { ok: false, error: "Prova ja enviada" }
   }
 
   if (existing) {
-    const { error } = await supabase
-      .from("classroom_activity_submissions")
-      .update({
-        answers: sanitized,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", existing.id)
-      .eq("status", "rascunho")
-
-    if (error) return { ok: false, error: error.message }
+    try {
+      await query(
+        "update public.classroom_activity_submissions set answers = $1::jsonb, updated_at = timezone('utc'::text, now()) where id = $2 and status = 'rascunho'",
+        [JSON.stringify(sanitized), existing.id]
+      )
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? "Erro ao salvar rascunho" }
+    }
   } else {
-    const { error } = await supabase.from("classroom_activity_submissions").insert({
-      activity_id: activityId,
-      student_id: user.id,
-      status: "rascunho",
-      answers: sanitized,
-    })
-    if (error) return { ok: false, error: error.message }
+    try {
+      await query(
+        "insert into public.classroom_activity_submissions (activity_id, student_id, status, answers) values ($1, $2, 'rascunho', $3::jsonb)",
+        [activityId, user.id, JSON.stringify(sanitized)]
+      )
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? "Erro ao salvar rascunho" }
+    }
   }
 
   revalidateActivityPaths(classroomId, activityId)
@@ -298,29 +280,23 @@ export async function submitExam(
   activityId: string,
   answers: StudentExamAnswers
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const member = await assertStudentMember(supabase, classroomId, user.id)
+  const member = await assertStudentMember(classroomId, user.id)
   if (!member) return { ok: false, error: "Voce nao participa desta sala" }
 
-  const { data: act, error: actErr } = await supabase
-    .from("classroom_activities")
-    .select("settings, status")
-    .eq("id", activityId)
-    .eq("classroom_id", classroomId)
-    .maybeSingle()
-
-  if (actErr || !act) return { ok: false, error: "Atividade nao encontrada" }
+  const act = await queryOne<{ settings: any; status: string }>(
+    "select settings, status from public.classroom_activities where id = $1 and classroom_id = $2",
+    [activityId, classroomId]
+  )
+  if (!act) return { ok: false, error: "Atividade nao encontrada" }
   if (act.status === "rascunho") return { ok: false, error: "Atividade indisponivel" }
   if (act.status === "encerrada") {
     return { ok: false, error: "Atividade encerrada" }
   }
 
-  const exam = parseExamFromSettings(act.settings as Record<string, unknown>)
+  const exam = parseExamFromSettings(asRecord(act.settings))
   if (!exam) return { ok: false, error: "Sem questoes nesta atividade" }
 
   const err = validateAnswersForSubmit(exam, answers)
@@ -342,12 +318,10 @@ export async function submitExam(
   const scoreMcq = computeMcqScore(exam, sanitized)
   const now = new Date().toISOString()
 
-  const { data: existing } = await supabase
-    .from("classroom_activity_submissions")
-    .select("id, status")
-    .eq("activity_id", activityId)
-    .eq("student_id", user.id)
-    .maybeSingle()
+  const existing = await queryOne<{ id: string; status: string }>(
+    "select id, status from public.classroom_activity_submissions where activity_id = $1 and student_id = $2",
+    [activityId, user.id]
+  )
 
   if (existing?.status === "enviado") {
     return { ok: false, error: "Prova ja enviada" }
@@ -357,32 +331,27 @@ export async function submitExam(
   const scoreTotal = scoreMcq + sumOpenScores(exam, openScores)
 
   if (existing) {
-    const { error } = await supabase
-      .from("classroom_activity_submissions")
-      .update({
-        answers: sanitized,
-        status: "enviado",
-        score_mcq: scoreMcq,
-        open_scores: openScores,
-        score_total: scoreTotal,
-        submitted_at: now,
-      })
-      .eq("id", existing.id)
-      .eq("status", "rascunho")
-
-    if (error) return { ok: false, error: error.message }
+    try {
+      await query(
+        `update public.classroom_activity_submissions
+         set answers = $1::jsonb, status = 'enviado', score_mcq = $2, open_scores = $3::jsonb, score_total = $4, submitted_at = $5
+         where id = $6 and status = 'rascunho'`,
+        [JSON.stringify(sanitized), scoreMcq, JSON.stringify(openScores), scoreTotal, now, existing.id]
+      )
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? "Erro ao enviar" }
+    }
   } else {
-    const { error } = await supabase.from("classroom_activity_submissions").insert({
-      activity_id: activityId,
-      student_id: user.id,
-      status: "enviado",
-      answers: sanitized,
-      score_mcq: scoreMcq,
-      open_scores: openScores,
-      score_total: scoreTotal,
-      submitted_at: now,
-    })
-    if (error) return { ok: false, error: error.message }
+    try {
+      await query(
+        `insert into public.classroom_activity_submissions
+         (activity_id, student_id, status, answers, score_mcq, open_scores, score_total, submitted_at)
+         values ($1,$2,'enviado',$3::jsonb,$4,$5::jsonb,$6,$7)`,
+        [activityId, user.id, JSON.stringify(sanitized), scoreMcq, JSON.stringify(openScores), scoreTotal, now]
+      )
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? "Erro ao enviar" }
+    }
   }
 
   revalidateActivityPaths(classroomId, activityId)
@@ -397,42 +366,37 @@ export async function listSubmissionsForActivity(
   classroomId: string,
   activityId: string
 ): Promise<{ rows: SubmissionListItem[]; error: string | null }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { rows: [], error: "Nao autenticado" }
 
-  const ok = await assertProfessorOwnsClassroom(supabase, classroomId, user.id)
+  const ok = await assertProfessorOwnsClassroom(classroomId, user.id)
   if (!ok) return { rows: [], error: "Sala nao encontrada" }
 
-  const { data: act } = await supabase
-    .from("classroom_activities")
-    .select("id")
-    .eq("id", activityId)
-    .eq("classroom_id", classroomId)
-    .maybeSingle()
+  const act = await queryOne<{ id: string }>(
+    "select id from public.classroom_activities where id = $1 and classroom_id = $2",
+    [activityId, classroomId]
+  )
 
   if (!act) return { rows: [], error: "Atividade nao encontrada" }
 
-  const { data, error } = await supabase
-    .from("classroom_activity_submissions")
-    .select("*")
-    .eq("activity_id", activityId)
-    .order("submitted_at", { ascending: false, nullsFirst: false })
-
-  if (error) return { rows: [], error: error.message }
-
-  const subs = (data ?? []) as Record<string, unknown>[]
+  let subs: Record<string, unknown>[] = []
+  try {
+    subs = await query<Record<string, unknown>>(
+      "select * from public.classroom_activity_submissions where activity_id = $1 order by submitted_at desc nulls last",
+      [activityId]
+    )
+  } catch (e: any) {
+    return { rows: [], error: e?.message ?? "Erro ao listar entregas" }
+  }
   const studentIds = [...new Set(subs.map((s) => s.student_id as string))]
   let nameById = new Map<string, string | null>()
   if (studentIds.length > 0) {
-    const { data: profs } = await supabase
-      .from("profiles")
-      .select("id, full_name")
-      .in("id", studentIds)
+    const profs = await query<{ id: string; full_name: string | null }>(
+      "select id, full_name from public.profiles where id = any($1::uuid[])",
+      [studentIds]
+    ).catch(() => [])
     nameById = new Map(
-      (profs ?? []).map((p) => [p.id as string, p.full_name as string | null])
+      (profs ?? []).map((p) => [p.id, p.full_name ?? null])
     )
   }
 
@@ -451,22 +415,16 @@ export async function getSubmissionEnviosByActivity(
   classroomId: string,
   activityIds: string[]
 ): Promise<Record<string, number>> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user || activityIds.length === 0) return {}
 
-  const ok = await assertProfessorOwnsClassroom(supabase, classroomId, user.id)
+  const ok = await assertProfessorOwnsClassroom(classroomId, user.id)
   if (!ok) return {}
 
-  const { data, error } = await supabase
-    .from("classroom_activity_submissions")
-    .select("activity_id")
-    .in("activity_id", activityIds)
-    .eq("status", "enviado")
-
-  if (error) return {}
+  const data = await query<{ activity_id: string }>(
+    "select activity_id from public.classroom_activity_submissions where activity_id = any($1::uuid[]) and status = 'enviado'",
+    [activityIds]
+  ).catch(() => [])
 
   const counts: Record<string, number> = {}
   for (const id of activityIds) counts[id] = 0
@@ -481,39 +439,25 @@ export async function countSubmissionsForActivity(
   classroomId: string,
   activityId: string
 ): Promise<{ enviados: number; total: number; error: string | null }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { enviados: 0, total: 0, error: "Nao autenticado" }
 
-  const ok = await assertProfessorOwnsClassroom(supabase, classroomId, user.id)
+  const ok = await assertProfessorOwnsClassroom(classroomId, user.id)
   if (!ok) return { enviados: 0, total: 0, error: "Sala nao encontrada" }
 
-  const { count: total, error: e1 } = await supabase
-    .from("classroom_activity_submissions")
-    .select("*", { count: "exact", head: true })
-    .eq("activity_id", activityId)
-
-  const { count: enviados, error: e2 } = await supabase
-    .from("classroom_activity_submissions")
-    .select("*", { count: "exact", head: true })
-    .eq("activity_id", activityId)
-    .eq("status", "enviado")
-
-  if (e1 || e2) {
-    return {
-      enviados: 0,
-      total: 0,
-      error: e1?.message ?? e2?.message ?? "Erro",
-    }
+  try {
+    const row = await queryOne<{ total: number; enviados: number }>(
+      `select
+         (select count(*)::int from public.classroom_activity_submissions where activity_id = $1) as total,
+         (select count(*)::int from public.classroom_activity_submissions where activity_id = $1 and status = 'enviado') as enviados`,
+      [activityId]
+    )
+    return { enviados: row?.enviados ?? 0, total: row?.total ?? 0, error: null }
+  } catch (e: any) {
+    return { enviados: 0, total: 0, error: e?.message ?? "Erro" }
   }
 
-  return {
-    enviados: enviados ?? 0,
-    total: total ?? 0,
-    error: null,
-  }
+  // unreachable
 }
 
 export async function gradeOpenAnswers(
@@ -522,25 +466,19 @@ export async function gradeOpenAnswers(
   submissionId: string,
   openScores: Record<string, number>
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const ok = await assertProfessorOwnsClassroom(supabase, classroomId, user.id)
+  const ok = await assertProfessorOwnsClassroom(classroomId, user.id)
   if (!ok) return { ok: false, error: "Sala nao encontrada" }
 
-  const { data: act } = await supabase
-    .from("classroom_activities")
-    .select("settings")
-    .eq("id", activityId)
-    .eq("classroom_id", classroomId)
-    .maybeSingle()
-
+  const act = await queryOne<{ settings: any }>(
+    "select settings from public.classroom_activities where id = $1 and classroom_id = $2",
+    [activityId, classroomId]
+  )
   if (!act) return { ok: false, error: "Atividade nao encontrada" }
 
-  const exam = parseExamFromSettings(act.settings as Record<string, unknown>)
+  const exam = parseExamFromSettings(asRecord(act.settings))
   if (!exam) return { ok: false, error: "Atividade sem prova" }
 
   const merged: Record<string, number> = {}
@@ -557,14 +495,11 @@ export async function gradeOpenAnswers(
     merged[q.id] = v
   }
 
-  const { data: sub, error: fetchErr } = await supabase
-    .from("classroom_activity_submissions")
-    .select("id, student_id, score_mcq, status, open_scores")
-    .eq("id", submissionId)
-    .eq("activity_id", activityId)
-    .maybeSingle()
-
-  if (fetchErr || !sub) return { ok: false, error: "Entrega nao encontrada" }
+  const sub = await queryOne<{ id: string; student_id: string; score_mcq: number; status: string; open_scores: any }>(
+    "select id, student_id, score_mcq, status, open_scores from public.classroom_activity_submissions where id = $1 and activity_id = $2",
+    [submissionId, activityId]
+  )
+  if (!sub) return { ok: false, error: "Entrega nao encontrada" }
   if (sub.status !== "enviado") {
     return { ok: false, error: "Apenas provas enviadas podem ser corrigidas" }
   }
@@ -574,16 +509,14 @@ export async function gradeOpenAnswers(
   const scoreTotal =
     Number(sub.score_mcq ?? 0) + sumOpenScores(exam, nextOpen)
 
-  const { error } = await supabase
-    .from("classroom_activity_submissions")
-    .update({
-      open_scores: nextOpen,
-      score_total: scoreTotal,
-    })
-    .eq("id", submissionId)
-    .eq("status", "enviado")
-
-  if (error) return { ok: false, error: error.message }
+  try {
+    await query(
+      "update public.classroom_activity_submissions set open_scores = $1::jsonb, score_total = $2 where id = $3 and status = 'enviado'",
+      [JSON.stringify(nextOpen), scoreTotal, submissionId]
+    )
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao corrigir" }
+  }
   revalidateActivityPaths(classroomId, activityId)
   const sid = sub.student_id as string | undefined
   if (sid) {

@@ -2,6 +2,7 @@ import type { Metadata } from 'next'
 import { Sora, DM_Sans, JetBrains_Mono } from 'next/font/google'
 import { Analytics } from '@vercel/analytics/next'
 import { Toaster } from 'sonner'
+import { AuthSessionProvider } from "@/components/auth/session-provider"
 import './globals.css'
 
 const sora = Sora({ 
@@ -56,7 +57,7 @@ export default function RootLayout({
         suppressHydrationWarning
         className={`${sora.variable} ${dmSans.variable} ${jetbrainsMono.variable} font-sans antialiased`}
       >
-        {children}
+        <AuthSessionProvider>{children}</AuthSessionProvider>
         <Toaster richColors position="top-center" />
         <Analytics />
       </body>
