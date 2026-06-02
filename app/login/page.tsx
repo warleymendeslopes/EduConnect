@@ -44,7 +44,21 @@ function LoginForm() {
       return
     }
 
-    router.push(next ?? "/dashboard/aluno")
+    // Roteia pelo tipo de usuario; o middleware ainda garante a area correta.
+    let destination = next
+    if (!destination) {
+      try {
+        const me = await fetch("/api/me").then((r) => r.json())
+        destination =
+          me?.profile?.user_type === "professor"
+            ? "/dashboard/professor"
+            : "/dashboard/aluno"
+      } catch {
+        destination = "/dashboard/aluno"
+      }
+    }
+
+    router.push(destination)
     router.refresh()
   }
 
