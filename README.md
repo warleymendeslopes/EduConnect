@@ -154,6 +154,48 @@ npm run dev
 http://localhost:3000
 ```
 
+## Rodar com Docker
+
+A forma mais rapida de subir tudo (Postgres + aplicacao) e via Docker Compose. Nao
+precisa de Node nem Postgres instalados localmente.
+
+1. (Opcional) Crie um arquivo `.env` a partir do exemplo e ajuste os segredos:
+
+```bash
+cp .env.docker.example .env
+```
+
+2. Suba a stack (build da imagem + Postgres + app):
+
+```bash
+docker compose up -d --build
+```
+
+3. Abra a aplicacao em `http://localhost:3000`.
+
+O servico `db` cria o schema automaticamente na **primeira** inicializacao, rodando
+`scripts/100_bootstrap_postgres.sql` e `scripts/200_app_schema_postgres.sql` via
+`docker-entrypoint-initdb.d`. A aplicacao conecta no Postgres pela rede interna do
+Compose (`DATABASE_URL=postgresql://app_user:...@db:5432/appdb`, com `DATABASE_SSL=false`).
+
+Comandos uteis:
+
+```bash
+docker compose logs -f app        # acompanhar logs da aplicacao
+docker compose ps                 # status dos containers
+docker compose down               # parar (mantem os dados no volume pgdata)
+docker compose down -v            # parar e APAGAR os dados do banco
+APP_PORT=3001 docker compose up -d # publicar o app em outra porta do host
+```
+
+Observacoes:
+
+- O schema so e aplicado em um volume vazio. Para reaplicar em um banco ja existente,
+  use `node scripts/apply-sql.mjs scripts/100_bootstrap_postgres.sql scripts/200_app_schema_postgres.sql`
+  apontando o `DATABASE_URL` para o container, ou recrie o volume com `docker compose down -v`.
+- Defina um `AUTH_SECRET` forte (`openssl rand -base64 32`) e os tokens de
+  `BLOB_READ_WRITE_TOKEN`/`XAI_API_KEY` no `.env` para habilitar upload e revisao de conteudo.
+
 ## Scripts disponiveis
 
 ```bash
@@ -270,3 +312,4 @@ Repositorio remoto configurado:
 ```text
 git@github.com:warleymendeslopes/EduConnect.git
 ```
+

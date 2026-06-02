@@ -1,5 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  /** Build enxuto para Docker (gera .next/standalone com server.js). */
+  output: "standalone",
   typescript: {
     ignoreBuildErrors: true,
   },
