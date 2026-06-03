@@ -5,6 +5,7 @@ import { randomUUID } from "crypto"
 import { revalidatePath } from "next/cache"
 import { after } from "next/server"
 import { requireAuthedUser } from "@/lib/auth/user"
+import { getProfileAccess, isApprovedProfessor } from "@/lib/auth/profile"
 import { query, queryOne } from "@/lib/db/query"
 import { runArticleReview } from "@/lib/content/review-agent"
 import {
@@ -100,12 +101,9 @@ function isArticleCoverVideoFile(file: File): boolean {
 async function assertProfessor() {
   const user = await requireAuthedUser().catch(() => null)
   if (!user) return { user: null as null, error: "Nao autenticado" as const }
-  const profile = await queryOne<{ user_type: string }>(
-    "select user_type from public.profiles where id = $1",
-    [user.id]
-  )
-  if (profile?.user_type !== "professor") {
-    return { user: null as null, error: "Apenas professores" as const }
+  const profile = await getProfileAccess(user.id)
+  if (!isApprovedProfessor(profile)) {
+    return { user: null as null, error: "Apenas professores aprovados" as const }
   }
   return { user: { id: user.id }, error: null as null }
 }

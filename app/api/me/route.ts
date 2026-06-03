@@ -4,7 +4,12 @@ import { queryOne } from "@/lib/db/query"
 
 export const runtime = "nodejs"
 
-type ProfileRow = { full_name: string | null; avatar_url: string | null; user_type: string }
+type ProfileRow = {
+  full_name: string | null
+  avatar_url: string | null
+  user_type: string | null
+  professor_verification_status: string | null
+}
 
 export async function GET() {
   const session = await auth()
@@ -14,7 +19,7 @@ export async function GET() {
   }
 
   const profile = await queryOne<ProfileRow>(
-    "select full_name, avatar_url, user_type from public.profiles where id = $1",
+    "select full_name, avatar_url, user_type, professor_verification_status from public.profiles where id = $1",
     [userId]
   )
 
@@ -24,4 +29,3 @@ export async function GET() {
     profile,
   })
 }
-

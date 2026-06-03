@@ -54,10 +54,16 @@ function ProfessorLayoutContent({
   const pathname = usePathname()
   const router = useRouter()
   const searchParams = useSearchParams()
-  const isPendente = searchParams.get("status") === "pendente"
   const { status } = useSession()
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [profile, setProfile] = useState<{ full_name: string; avatar_url: string | null } | null>(null)
+  const [profile, setProfile] = useState<{
+    full_name: string
+    avatar_url: string | null
+    professor_verification_status?: string | null
+  } | null>(null)
+  const isPendente =
+    searchParams.get("status") === "pendente" ||
+    profile?.professor_verification_status === "pending"
 
   useEffect(() => {
     if (status !== "authenticated") return

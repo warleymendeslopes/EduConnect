@@ -10,6 +10,7 @@ next.user-config.*
 # Environment variables
 .env*.local
 .env
+client_secret_*.json
 
 # Common ignores
 node_modules
