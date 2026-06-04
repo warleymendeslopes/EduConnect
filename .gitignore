@@ -11,6 +11,9 @@ next.user-config.*
 .env*.local
 .env
 
+# Google OAuth credentials
+client_secret*.json
+
 # Common ignores
 node_modules
 .next/

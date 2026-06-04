@@ -4,7 +4,7 @@ import { put } from "@vercel/blob"
 import { randomUUID } from "crypto"
 import { revalidatePath } from "next/cache"
 import { after } from "next/server"
-import { requireAuthedUser } from "@/lib/auth/user"
+import { getAuthedUser, requireAuthedUser } from "@/lib/auth/user"
 import { query, queryOne } from "@/lib/db/query"
 import { runArticleReview } from "@/lib/content/review-agent"
 import {
@@ -32,6 +32,7 @@ import {
 const TRIX_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 /** Capa em video (MP4/WebM/MOV) */
 const COVER_VIDEO_MAX_BYTES = 80 * 1024 * 1024
+const COMMENT_MAX_LENGTH = 1000
 
 function asRecord(v: unknown): Record<string, unknown> {
   if (!v) return {}
@@ -139,6 +140,7 @@ export type ProfessorContentListItem = {
   published_at: string | null
   like_count: number
   share_count: number
+  comment_count: number
   updated_at: string
   reviewSeal: "none" | "excellence" | null
   reviewScore: number | null
@@ -165,7 +167,7 @@ export async function listMyContentItemsForProfessor(): Promise<
     data = await query<any>(
       `select
         ci.id, ci.type, ci.title, ci.body_html, ci.status, ci.visibility,
-        ci.published_at, ci.like_count, ci.share_count, ci.updated_at, ci.settings,
+        ci.published_at, ci.like_count, ci.share_count, ci.comment_count, ci.updated_at, ci.settings,
         crr.score as review_score, crr.seal as review_seal
        from public.content_items ci
        left join public.content_review_results crr on crr.content_item_id = ci.id
@@ -181,7 +183,7 @@ export async function listMyContentItemsForProfessor(): Promise<
   type RowWithReview = {
     id: string; type: string; title: string; body_html: string | null
     status: string; visibility: string; published_at: string | null
-    like_count: number; share_count: number; updated_at: string
+    like_count: number; share_count: number; comment_count: number; updated_at: string
     settings: Record<string, unknown>
     review_score: number | null
     review_seal: string | null
@@ -241,6 +243,7 @@ export async function listMyContentItemsForProfessor(): Promise<
       published_at: row.published_at,
       like_count: row.like_count,
       share_count: row.share_count,
+      comment_count: row.comment_count,
       updated_at: row.updated_at,
       reviewSeal: (reviewData?.seal as "none" | "excellence") ?? null,
       reviewScore: reviewData?.score ?? null,
@@ -1517,6 +1520,296 @@ export async function getMyLikesForContentIds(
   ).catch(() => [])
 
   return new Set(rows.map((r) => r.content_item_id))
+}
+
+async function canViewContentItem(
+  contentItemId: string,
+  userId: string | null
+): Promise<boolean> {
+  const row = await queryOne<{ can_view: boolean }>(
+    "select public.user_can_view_content_item($1::uuid, $2::uuid) as can_view",
+    [contentItemId, userId]
+  ).catch(() => null)
+  return row?.can_view === true
+}
+
+export type ContentComment = {
+  id: string
+  content_item_id: string
+  user_id: string
+  body: string
+  parent_id: string | null
+  created_at: string
+  updated_at: string
+  author: {
+    full_name: string | null
+    avatar_url: string | null
+  }
+  replies?: ContentComment[]
+}
+
+type CommentRow = {
+  id: string
+  content_item_id: string
+  user_id: string
+  body: string
+  parent_id: string | null
+  created_at: string
+  updated_at: string
+  full_name: string | null
+  avatar_url: string | null
+}
+
+function mapComment(row: CommentRow): ContentComment {
+  return {
+    id: row.id,
+    content_item_id: row.content_item_id,
+    user_id: row.user_id,
+    body: row.body,
+    parent_id: row.parent_id,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    author: {
+      full_name: row.full_name,
+      avatar_url: row.avatar_url,
+    },
+  }
+}
+
+export async function listContentComments(
+  contentItemId: string
+): Promise<
+  { ok: true; comments: ContentComment[]; viewerUserId: string | null } | { ok: false; error: string }
+> {
+  const user = await getAuthedUser()
+  const canView = await canViewContentItem(contentItemId, user?.id ?? null)
+  if (!canView) return { ok: false, error: "Conteudo nao encontrado" }
+
+  const rows = await query<CommentRow>(
+    `select
+       cc.id, cc.content_item_id, cc.user_id, cc.body, cc.parent_id, cc.created_at, cc.updated_at,
+       p.full_name, p.avatar_url
+     from public.content_comments cc
+     left join public.content_comments parent on parent.id = cc.parent_id
+     left join public.profiles p on p.id = cc.user_id
+     where cc.content_item_id = $1
+     order by
+       coalesce(parent.created_at, cc.created_at) asc,
+       coalesce(cc.parent_id, cc.id) asc,
+       case when cc.parent_id is null then 0 else 1 end asc,
+       cc.created_at asc`,
+    [contentItemId]
+  ).catch(() => [])
+
+  const roots: ContentComment[] = []
+  const byId = new Map<string, ContentComment>()
+  for (const row of rows) {
+    const comment = mapComment(row)
+    byId.set(comment.id, comment)
+    if (!comment.parent_id) {
+      comment.replies = []
+      roots.push(comment)
+    }
+  }
+  for (const row of rows) {
+    if (!row.parent_id) continue
+    const parent = byId.get(row.parent_id)
+    if (!parent || parent.parent_id) continue
+    parent.replies ??= []
+    parent.replies.push(mapComment(row))
+  }
+
+  return {
+    ok: true,
+    comments: roots,
+    viewerUserId: user?.id ?? null,
+  }
+}
+
+export async function listContentCommentPreviews(
+  contentItemIds: string[],
+  perContentLimit = 2
+): Promise<Record<string, ContentComment[]>> {
+  const user = await getAuthedUser()
+  const ids = [
+    ...new Set(
+      contentItemIds.filter((id) => typeof id === "string" && id.trim().length > 0)
+    ),
+  ]
+  if (ids.length === 0) return {}
+
+  const limit = Math.max(1, Math.min(perContentLimit, 5))
+  const rows = await query<CommentRow & { rn: number }>(
+    `with ranked as (
+       select
+         cc.id, cc.content_item_id, cc.user_id, cc.body, cc.parent_id, cc.created_at, cc.updated_at,
+         p.full_name, p.avatar_url,
+         row_number() over (
+           partition by cc.content_item_id
+           order by cc.created_at desc, cc.id desc
+         ) as rn
+       from public.content_comments cc
+       left join public.profiles p on p.id = cc.user_id
+       where cc.content_item_id = any($1::uuid[])
+         and cc.parent_id is null
+         and public.user_can_view_content_item(cc.content_item_id, $2::uuid)
+     )
+     select *
+     from ranked
+     where rn <= $3
+     order by content_item_id asc, created_at asc`,
+    [ids, user?.id ?? null, limit]
+  ).catch(() => [])
+
+  const grouped: Record<string, ContentComment[]> = {}
+  for (const row of rows) {
+    grouped[row.content_item_id] ??= []
+    grouped[row.content_item_id].push(mapComment(row))
+  }
+  return grouped
+}
+
+export async function createContentComment(
+  contentItemId: string,
+  body: string,
+  parentCommentId?: string | null
+): Promise<
+  | { ok: true; comment: ContentComment; commentCount: number }
+  | { ok: false; error: string }
+> {
+  const user = await requireAuthedUser().catch(() => null)
+  if (!user) return { ok: false, error: "Nao autenticado" }
+
+  const cleanBody = body.trim()
+  if (!cleanBody) return { ok: false, error: "Escreva um comentario" }
+  if (cleanBody.length > COMMENT_MAX_LENGTH) {
+    return { ok: false, error: `Comentario muito longo (max ${COMMENT_MAX_LENGTH} caracteres)` }
+  }
+
+  const canView = await canViewContentItem(contentItemId, user.id)
+  if (!canView) return { ok: false, error: "Conteudo nao encontrado" }
+
+  const parentId = parentCommentId?.trim() || null
+  if (parentId) {
+    const parent = await queryOne<{ id: string; parent_id: string | null }>(
+      "select id, parent_id from public.content_comments where id = $1 and content_item_id = $2",
+      [parentId, contentItemId]
+    )
+    if (!parent) return { ok: false, error: "Comentario nao encontrado" }
+    if (parent.parent_id) {
+      return { ok: false, error: "Nao e possivel responder uma resposta" }
+    }
+  }
+
+  try {
+    const row = await queryOne<CommentRow>(
+      `with inserted as (
+         insert into public.content_comments (content_item_id, user_id, body, parent_id)
+         values ($1, $2, $3, $4)
+         returning id, content_item_id, user_id, body, parent_id, created_at, updated_at
+       )
+       select inserted.*, p.full_name, p.avatar_url
+       from inserted
+       left join public.profiles p on p.id = inserted.user_id`,
+      [contentItemId, user.id, cleanBody, parentId]
+    )
+    if (!row) return { ok: false, error: "Erro ao comentar" }
+
+    const countRow = await queryOne<{ comment_count: number }>(
+      "select comment_count from public.content_items where id = $1",
+      [contentItemId]
+    )
+
+    revalidatePath("/dashboard/aluno")
+    revalidatePath("/dashboard/professor")
+    revalidatePath("/dashboard/professor/conteudos")
+    revalidatePath(`/conteudo/${contentItemId}`)
+
+    return {
+      ok: true,
+      comment: mapComment(row),
+      commentCount: countRow?.comment_count ?? 0,
+    }
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao comentar" }
+  }
+}
+
+export async function updateContentComment(
+  commentId: string,
+  body: string
+): Promise<
+  | { ok: true; comment: ContentComment }
+  | { ok: false; error: string }
+> {
+  const user = await requireAuthedUser().catch(() => null)
+  if (!user) return { ok: false, error: "Nao autenticado" }
+
+  const cleanBody = body.trim()
+  if (!cleanBody) return { ok: false, error: "Escreva um comentario" }
+  if (cleanBody.length > COMMENT_MAX_LENGTH) {
+    return { ok: false, error: `Comentario muito longo (max ${COMMENT_MAX_LENGTH} caracteres)` }
+  }
+
+  try {
+    const row = await queryOne<CommentRow>(
+      `with updated as (
+         update public.content_comments
+         set body = $1
+         where id = $2 and user_id = $3
+         returning id, content_item_id, user_id, body, parent_id, created_at, updated_at
+       )
+       select updated.*, p.full_name, p.avatar_url
+       from updated
+       left join public.profiles p on p.id = updated.user_id`,
+      [cleanBody, commentId, user.id]
+    )
+    if (!row) return { ok: false, error: "Comentario nao encontrado" }
+
+    revalidatePath(`/conteudo/${row.content_item_id}`)
+    return { ok: true, comment: mapComment(row) }
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao editar comentario" }
+  }
+}
+
+export async function deleteContentComment(
+  commentId: string
+): Promise<
+  | { ok: true; commentId: string; contentItemId: string; commentCount: number }
+  | { ok: false; error: string }
+> {
+  const user = await requireAuthedUser().catch(() => null)
+  if (!user) return { ok: false, error: "Nao autenticado" }
+
+  try {
+    const deleted = await queryOne<{ id: string; content_item_id: string }>(
+      `delete from public.content_comments
+       where id = $1 and user_id = $2
+       returning id, content_item_id`,
+      [commentId, user.id]
+    )
+    if (!deleted) return { ok: false, error: "Comentario nao encontrado" }
+
+    const countRow = await queryOne<{ comment_count: number }>(
+      "select comment_count from public.content_items where id = $1",
+      [deleted.content_item_id]
+    )
+
+    revalidatePath("/dashboard/aluno")
+    revalidatePath("/dashboard/professor")
+    revalidatePath("/dashboard/professor/conteudos")
+    revalidatePath(`/conteudo/${deleted.content_item_id}`)
+
+    return {
+      ok: true,
+      commentId: deleted.id,
+      contentItemId: deleted.content_item_id,
+      commentCount: countRow?.comment_count ?? 0,
+    }
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao excluir comentario" }
+  }
 }
 
 export async function toggleContentLike(

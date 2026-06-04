@@ -1,0 +1,8 @@
+.git
+.next
+node_modules
+client_secret_*.json
+.env*
+npm-debug.log*
+Dockerfile
+docker-compose.yml

@@ -145,9 +145,13 @@ create table if not exists public.content_items (
   settings jsonb not null default '{}'::jsonb,
   like_count integer not null default 0 check (like_count >= 0),
   share_count integer not null default 0 check (share_count >= 0),
+  comment_count integer not null default 0 check (comment_count >= 0),
   created_at timestamptz not null default timezone('utc'::text, now()),
   updated_at timestamptz not null default timezone('utc'::text, now())
 );
+
+alter table public.content_items
+  add column if not exists comment_count integer not null default 0;
 
 create table if not exists public.content_item_classrooms (
   content_item_id uuid not null references public.content_items(id) on delete cascade,
@@ -171,6 +175,23 @@ create table if not exists public.content_share_events (
   share_method text not null,
   created_at timestamptz not null default timezone('utc'::text, now())
 );
+
+create table if not exists public.content_comments (
+  id uuid primary key default gen_random_uuid(),
+  content_item_id uuid not null references public.content_items(id) on delete cascade,
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  body text not null check (char_length(btrim(body)) between 1 and 1000),
+  parent_id uuid references public.content_comments(id) on delete cascade,
+  created_at timestamptz not null default timezone('utc'::text, now()),
+  updated_at timestamptz not null default timezone('utc'::text, now())
+);
+
+create index if not exists idx_content_comments_item_created
+  on public.content_comments (content_item_id, created_at asc);
+create index if not exists idx_content_comments_user
+  on public.content_comments (user_id);
+create index if not exists idx_content_comments_parent
+  on public.content_comments (parent_id);
 
 create or replace function public.content_reactions_adjust_like_count()
 returns trigger
@@ -214,10 +235,88 @@ create trigger tr_content_share_events_count
   after insert on public.content_share_events
   for each row execute function public.content_share_events_bump_count();
 
+create or replace function public.content_comments_adjust_comment_count()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if tg_op = 'INSERT' then
+    update public.content_items
+      set comment_count = comment_count + 1, updated_at = timezone('utc'::text, now())
+      where id = new.content_item_id;
+  elsif tg_op = 'DELETE' then
+    update public.content_items
+      set comment_count = greatest(0, comment_count - 1), updated_at = timezone('utc'::text, now())
+      where id = old.content_item_id;
+  end if;
+  return coalesce(new, old);
+end;
+$$;
+
+drop trigger if exists tr_content_comments_count on public.content_comments;
+create trigger tr_content_comments_count
+  after insert or delete on public.content_comments
+  for each row execute function public.content_comments_adjust_comment_count();
+
+create or replace function public.handle_content_comments_updated_at()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.updated_at = timezone('utc'::text, now());
+  return new;
+end;
+$$;
+
+update public.content_items ci
+set comment_count = counted.total
+from (
+  select content_item_id, count(*)::integer as total
+  from public.content_comments
+  group by content_item_id
+) counted
+where ci.id = counted.content_item_id
+  and ci.comment_count <> counted.total;
+
 drop trigger if exists tr_content_items_updated_at on public.content_items;
 create trigger tr_content_items_updated_at
   before update on public.content_items
   for each row execute function public.handle_updated_at();
+
+drop trigger if exists tr_content_comments_updated_at on public.content_comments;
+create trigger tr_content_comments_updated_at
+  before update on public.content_comments
+  for each row execute function public.handle_content_comments_updated_at();
+
+create or replace function public.content_comments_validate_parent()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if new.parent_id is null then
+    return new;
+  end if;
+
+  if not exists (
+    select 1
+    from public.content_comments parent
+    where parent.id = new.parent_id
+      and parent.content_item_id = new.content_item_id
+      and parent.parent_id is null
+  ) then
+    raise exception 'Resposta permitida apenas para comentario raiz do mesmo conteudo';
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists tr_content_comments_validate_parent on public.content_comments;
+create trigger tr_content_comments_validate_parent
+  before insert or update of parent_id, content_item_id on public.content_comments
+  for each row execute function public.content_comments_validate_parent();
 
 create or replace function public.is_profile_professor(p_user_id uuid)
 returns boolean
@@ -229,6 +328,55 @@ as $$
     select 1 from public.profiles p
     where p.id = p_user_id and p.user_type = 'professor'
   );
+$$;
+
+create or replace function public.user_can_view_content_item(p_content_id uuid, p_user_id uuid)
+returns boolean
+language plpgsql
+stable
+set search_path = public
+as $$
+declare
+  v record;
+begin
+  select ci.id, ci.author_id, ci.status, ci.visibility
+  into v
+  from public.content_items ci
+  where ci.id = p_content_id;
+
+  if v.id is null then
+    return false;
+  end if;
+
+  if v.status <> 'published' then
+    return p_user_id is not null and v.author_id = p_user_id;
+  end if;
+
+  if v.visibility = 'public' then
+    return true;
+  end if;
+
+  if v.visibility = 'private' then
+    return p_user_id is not null and v.author_id = p_user_id;
+  end if;
+
+  if v.visibility = 'classrooms' then
+    if p_user_id is null then
+      return false;
+    end if;
+    if v.author_id = p_user_id then
+      return true;
+    end if;
+    return exists (
+      select 1
+      from public.content_item_classrooms cic
+      where cic.content_item_id = p_content_id
+        and public.is_classroom_member(cic.classroom_id, p_user_id)
+    );
+  end if;
+
+  return false;
+end;
 $$;
 
 -- Feed for a given user id (no auth.uid())

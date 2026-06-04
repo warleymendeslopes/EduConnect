@@ -1,8 +1,10 @@
 "use client"
 
 import type { FeedContentItem } from "@/app/actions/content-items"
+import type { ContentComment } from "@/app/actions/content-items"
 import { recordContentShare, toggleContentLike } from "@/app/actions/content-items"
 import { ArticleCoverMedia } from "@/components/dashboard/article-cover-media"
+import { CardInlineComments } from "@/components/dashboard/card-inline-comments"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -79,14 +81,34 @@ function initials(name: string | null | undefined): string {
   return parts[0].slice(0, 2).toUpperCase()
 }
 
+const EXCERPT_MAX = 600
+
+function plainText(html: string | null | undefined): string {
+  if (!html?.trim()) return ""
+  return html
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
 type Props = {
   initialArticles?: FeedContentItem[]
   initialLikedIds?: string[]
+  initialCommentPreviews?: Record<string, ContentComment[]>
+  viewerUserId?: string | null
 }
 
 export function AlunoFeedClient({
   initialArticles = [],
   initialLikedIds = [],
+  initialCommentPreviews = {},
+  viewerUserId = null,
 }: Props) {
   const router = useRouter()
   const [savedItems, setSavedItems] = useState<string[]>([])
@@ -95,13 +117,20 @@ export function AlunoFeedClient({
     for (const id of initialLikedIds) o[id] = true
     return o
   })
-  const [counts, setCounts] = useState<Record<string, { likes: number; shares: number }>>(() => {
-    const o: Record<string, { likes: number; shares: number }> = {}
+  const [counts, setCounts] = useState<Record<string, { likes: number; shares: number; comments: number }>>(() => {
+    const o: Record<string, { likes: number; shares: number; comments: number }> = {}
     for (const a of initialArticles) {
-      o[a.id] = { likes: a.like_count, shares: a.share_count }
+      o[a.id] = { likes: a.like_count, shares: a.share_count, comments: a.comment_count }
     }
     return o
   })
+
+  const updateCommentCount = (id: string, count: number) => {
+    setCounts((prev) => ({
+      ...prev,
+      [id]: { ...(prev[id] ?? { likes: 0, shares: 0, comments: 0 }), comments: count },
+    }))
+  }
 
   const toggleSave = (id: string) => {
     setSavedItems((prev) => (prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]))
@@ -209,7 +238,7 @@ export function AlunoFeedClient({
 
           <div className="space-y-4">
             {initialArticles.map((item) => {
-              const c = counts[item.id] ?? { likes: item.like_count, shares: item.share_count }
+              const c = counts[item.id] ?? { likes: item.like_count, shares: item.share_count, comments: item.comment_count }
               const liked = !!likedMap[item.id]
               const isExercise = item.type === "exercise"
               const isAssessment = item.type === "assessment"
@@ -298,7 +327,31 @@ export function AlunoFeedClient({
                   </div>
 
                   <div className="px-4 pb-3">
-                    <h3 className="font-display font-semibold text-lg text-gray-900 mb-2">{item.title}</h3>
+                    <h3 className="font-display font-semibold text-lg text-gray-900 mb-1">{item.title}</h3>
+
+                    {/* Descrição — max 600 chars */}
+                    {(() => {
+                      const text = plainText(item.body_html)
+                      if (!text) return null
+                      const truncated = text.length > EXCERPT_MAX
+                      return (
+                        <p className="text-sm text-gray-700 leading-relaxed mb-2">
+                          {truncated ? text.slice(0, EXCERPT_MAX) : text}
+                          {truncated ? (
+                            <>
+                              {"… "}
+                              <Link
+                                href={`/conteudo/${item.id}`}
+                                className="font-semibold text-[#1D4ED8] hover:underline"
+                              >
+                                ver mais
+                              </Link>
+                            </>
+                          ) : null}
+                        </p>
+                      )
+                    })()}
+
                     <div className="flex items-center gap-2 text-sm text-[#10B981] mb-3">
                       <Sparkles className="h-4 w-4" />
                       <span>
@@ -353,10 +406,16 @@ export function AlunoFeedClient({
                           />
                           <span className="text-sm">{c.likes}</span>
                         </button>
-                        <span className="flex items-center gap-1 text-gray-400 text-sm">
+                        <button
+                          type="button"
+                          className="flex items-center gap-1 text-gray-400 hover:text-[#1D4ED8] transition-colors text-sm"
+                          onClick={() => {
+                            document.getElementById(`comment-input-${item.id}`)?.focus()
+                          }}
+                        >
                           <MessageCircle className="h-5 w-5" />
-                          <span>0</span>
-                        </span>
+                          <span>{c.comments}</span>
+                        </button>
                         <button
                           type="button"
                           className="text-gray-600 hover:text-[#1D4ED8] transition-colors"
@@ -375,6 +434,14 @@ export function AlunoFeedClient({
                       </button>
                     </div>
                   </div>
+
+                  <CardInlineComments
+                    contentItemId={item.id}
+                    initialComments={initialCommentPreviews[item.id] ?? []}
+                    initialCommentCount={c.comments}
+                    viewerUserId={viewerUserId}
+                    onCountChange={(count) => updateCommentCount(item.id, count)}
+                  />
 
                   <div className="px-4 pb-4">
                     <Button
