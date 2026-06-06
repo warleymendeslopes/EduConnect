@@ -58,10 +58,13 @@ export default function AlunoLayout({
 
   useEffect(() => {
     if (status !== "authenticated") return
-    fetch("/api/me")
+    const loadProfile = () => fetch("/api/me")
       .then((r) => r.json())
       .then((d) => setProfile(d?.profile ?? null))
       .catch(() => setProfile(null))
+    loadProfile()
+    window.addEventListener("profile:updated", loadProfile)
+    return () => window.removeEventListener("profile:updated", loadProfile)
   }, [status])
 
   const handleLogout = async () => {
