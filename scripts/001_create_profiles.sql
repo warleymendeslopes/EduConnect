@@ -4,6 +4,8 @@ create table if not exists public.profiles (
   full_name text,
   user_type text not null check (user_type in ('aluno', 'professor')),
   avatar_url text,
+  cover_url text,
+  profile_visibility text not null default 'private' check (profile_visibility in ('public', 'private')),
   bio text,
   interests text[], -- Array de interesses/matérias
   created_at timestamp with time zone default timezone('utc'::text, now()) not null,

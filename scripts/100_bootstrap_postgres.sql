@@ -17,6 +17,9 @@ create table if not exists public.profiles (
   full_name text,
   user_type text not null check (user_type in ('aluno', 'professor')),
   avatar_url text,
+  cover_url text,
+  profile_visibility text not null default 'private'
+    check (profile_visibility in ('public', 'private')),
   professor_verification_status text not null default 'none'
     check (professor_verification_status in ('none', 'pending', 'approved', 'rejected')),
   professor_verification_doc_url text,
