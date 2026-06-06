@@ -139,6 +139,7 @@ export type ProfessorContentListItem = {
   published_at: string | null
   like_count: number
   share_count: number
+  view_count: number
   updated_at: string
   reviewSeal: "none" | "excellence" | null
   reviewScore: number | null
@@ -165,7 +166,7 @@ export async function listMyContentItemsForProfessor(): Promise<
     data = await query<any>(
       `select
         ci.id, ci.type, ci.title, ci.body_html, ci.status, ci.visibility,
-        ci.published_at, ci.like_count, ci.share_count, ci.updated_at, ci.settings,
+        ci.published_at, ci.like_count, ci.share_count, ci.view_count, ci.updated_at, ci.settings,
         crr.score as review_score, crr.seal as review_seal
        from public.content_items ci
        left join public.content_review_results crr on crr.content_item_id = ci.id
@@ -181,7 +182,7 @@ export async function listMyContentItemsForProfessor(): Promise<
   type RowWithReview = {
     id: string; type: string; title: string; body_html: string | null
     status: string; visibility: string; published_at: string | null
-    like_count: number; share_count: number; updated_at: string
+    like_count: number; share_count: number; view_count: number; updated_at: string
     settings: Record<string, unknown>
     review_score: number | null
     review_seal: string | null
@@ -241,6 +242,7 @@ export async function listMyContentItemsForProfessor(): Promise<
       published_at: row.published_at,
       like_count: row.like_count,
       share_count: row.share_count,
+      view_count: row.view_count ?? 0,
       updated_at: row.updated_at,
       reviewSeal: (reviewData?.seal as "none" | "excellence") ?? null,
       reviewScore: reviewData?.score ?? null,
@@ -1559,6 +1561,64 @@ export async function toggleContentLike(
     liked: !existing,
     likeCount: row?.like_count ?? 0,
   }
+}
+
+export async function getProfessorViewStats(): Promise<{
+  totalViews: number
+  totalPublications: number
+  totalLikes: number
+}> {
+  const p = await assertProfessor()
+  if (!p.user) return { totalViews: 0, totalPublications: 0, totalLikes: 0 }
+
+  const row = await queryOne<{
+    total_views: string
+    total_publications: string
+    total_likes: string
+  }>(
+    `select
+       coalesce(sum(view_count), 0) as total_views,
+       count(*) filter (where status = 'published') as total_publications,
+       coalesce(sum(like_count), 0) as total_likes
+     from public.content_items
+     where author_id = $1`,
+    [p.user.id]
+  ).catch(() => null)
+
+  return {
+    totalViews: Number(row?.total_views ?? 0),
+    totalPublications: Number(row?.total_publications ?? 0),
+    totalLikes: Number(row?.total_likes ?? 0),
+  }
+}
+
+export async function recordContentView(
+  contentItemId: string
+): Promise<{ ok: true; viewCount: number } | { ok: false; error: string }> {
+  const user = await requireAuthedUser().catch(() => null)
+  if (!user) return { ok: false, error: "Nao autenticado" }
+
+  const existing = await queryOne<{ id: string }>(
+    `select id from public.content_view_events
+     where content_item_id = $1
+       and user_id = $2
+       and created_at > now() - interval '24 hours'`,
+    [contentItemId, user.id]
+  ).catch(() => null)
+
+  if (!existing) {
+    await query(
+      "insert into public.content_view_events (content_item_id, user_id) values ($1, $2)",
+      [contentItemId, user.id]
+    ).catch(() => {})
+  }
+
+  const row = await queryOne<{ view_count: number }>(
+    "select view_count from public.content_items where id = $1",
+    [contentItemId]
+  )
+
+  return { ok: true, viewCount: row?.view_count ?? 0 }
 }
 
 export async function recordContentShare(
