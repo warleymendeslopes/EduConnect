@@ -1,21 +1,46 @@
 import { auth } from "@/auth"
 import { NextResponse, type NextRequest } from "next/server"
 
+function homeFor(userType?: string | null): string {
+  return userType === "professor" ? "/dashboard/professor" : "/dashboard/aluno"
+}
+
 export async function proxy(request: NextRequest) {
   const session = await auth()
+  const { pathname } = request.nextUrl
+  const userType = (session?.user as any)?.userType as "aluno" | "professor" | null | undefined
 
-  if (request.nextUrl.pathname.startsWith("/dashboard") && !session?.user) {
+  const isDashboard = pathname.startsWith("/dashboard")
+  const isAuthPage = pathname === "/login" || pathname === "/cadastro"
+
+  // Nao autenticado tentando acessar o dashboard -> login
+  if (isDashboard && !session?.user) {
     const url = request.nextUrl.clone()
     url.pathname = "/login"
-    url.searchParams.set("next", request.nextUrl.pathname)
+    url.searchParams.set("next", pathname)
     return NextResponse.redirect(url)
   }
 
-  if ((request.nextUrl.pathname === "/login" || request.nextUrl.pathname === "/cadastro") && session?.user) {
-    // Default redirect: if profile-driven routing is needed, we'll read it server-side on the page.
+  // Ja autenticado em pagina de auth -> dashboard correto para o tipo
+  if (isAuthPage && session?.user) {
     const url = request.nextUrl.clone()
-    url.pathname = "/dashboard/aluno"
+    url.pathname = homeFor(userType)
+    url.search = ""
     return NextResponse.redirect(url)
+  }
+
+  // Controle de area por tipo: professor nao acessa area de aluno e vice-versa.
+  // So aplica quando o tipo e conhecido (evita loop em onboarding sem perfil).
+  if (isDashboard && session?.user && userType) {
+    const inWrongArea =
+      (userType === "professor" && pathname.startsWith("/dashboard/aluno")) ||
+      (userType === "aluno" && pathname.startsWith("/dashboard/professor"))
+    if (inWrongArea) {
+      const url = request.nextUrl.clone()
+      url.pathname = homeFor(userType)
+      url.search = ""
+      return NextResponse.redirect(url)
+    }
   }
 
   return NextResponse.next()

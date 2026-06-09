@@ -502,6 +502,17 @@ create trigger handle_activity_submissions_updated_at
 alter table public.classrooms
   add column if not exists cover_image_pathname text;
 
+-- 014_profile_social_fields.sql
+alter table public.profiles
+  add column if not exists cover_url text;
+alter table public.profiles
+  add column if not exists profile_visibility text not null default 'private';
+alter table public.profiles
+  drop constraint if exists profiles_profile_visibility_check;
+alter table public.profiles
+  add constraint profiles_profile_visibility_check
+  check (profile_visibility in ('public', 'private'));
+
 -- Postgres-only: professor verification fields (kept on profiles for simplicity).
 alter table public.profiles
   add column if not exists professor_verification_status text;

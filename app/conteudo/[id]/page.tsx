@@ -2,6 +2,7 @@ import {
   getContentItemById,
   getMyLikesForContentIds,
   listContentComments,
+  recordContentView,
 } from "@/app/actions/content-items"
 import {
   getMcqSolutionsForContentExercise,
@@ -92,7 +93,10 @@ export default async function ConteudoPublicoPage({ params }: Props) {
     notFound()
   }
 
-  const likedSet = await getMyLikesForContentIds([id])
+  const [likedSet] = await Promise.all([
+    getMyLikesForContentIds([id]),
+    recordContentView(id),
+  ])
   const initialLiked = likedSet.has(id)
   const commentsRes = await listContentComments(id)
   const initialComments = commentsRes.ok ? commentsRes.comments : []

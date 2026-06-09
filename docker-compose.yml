@@ -1,0 +1,50 @@
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: edu-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app_password}
+      POSTGRES_DB: ${POSTGRES_DB:-appdb}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Aplicado automaticamente apenas na PRIMEIRA inicializacao (volume vazio),
+      # em ordem alfabetica, rodando como POSTGRES_USER.
+      - ./scripts/100_bootstrap_postgres.sql:/docker-entrypoint-initdb.d/100_bootstrap_postgres.sql:ro
+      - ./scripts/200_app_schema_postgres.sql:/docker-entrypoint-initdb.d/200_app_schema_postgres.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app_user} -d ${POSTGRES_DB:-appdb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      args:
+        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+    container_name: edu-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    # Carrega segredos (BLOB_READ_WRITE_TOKEN, XAI_API_KEY, AUTH_SECRET) do mesmo
+    # arquivo usado no dev local. O bloco environment abaixo tem PRECEDENCIA e
+    # sobrescreve o DATABASE_URL para apontar ao servico "db" da rede do Compose.
+    env_file:
+      - path: .env.development.local
+        required: false
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app_user}:${POSTGRES_PASSWORD:-app_password}@db:5432/${POSTGRES_DB:-appdb}
+      DATABASE_SSL: "false"
+      DATABASE_POOL_MAX: ${DATABASE_POOL_MAX:-10}
+      AUTH_TRUST_HOST: "true"
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+
+volumes:
+  pgdata:
