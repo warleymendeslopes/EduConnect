@@ -2,6 +2,7 @@ import { redirect } from "next/navigation"
 import {
   getFeedArticlesForCurrentUser,
   getMyLikesForContentIds,
+  getMySavesForContentIds,
   listContentCommentPreviews,
 } from "@/app/actions/content-items"
 import { getOnboardingStatus } from "@/app/actions/student-planner"
@@ -15,8 +16,9 @@ export default async function AlunoFeedPage() {
   const articles = (await getFeedArticlesForCurrentUser(20)) ?? []
   const ids = articles.map((a) => a.id)
 
-  const [liked, commentPreviews, user] = await Promise.all([
+  const [liked, saved, commentPreviews, user] = await Promise.all([
     getMyLikesForContentIds(ids),
+    getMySavesForContentIds(ids),
     listContentCommentPreviews(ids, 2),
     getAuthedUser(),
   ])
@@ -25,6 +27,7 @@ export default async function AlunoFeedPage() {
     <AlunoFeedClient
       initialArticles={articles}
       initialLikedIds={[...liked]}
+      initialSavedIds={[...saved]}
       initialCommentPreviews={commentPreviews}
       viewerUserId={user?.id ?? null}
     />

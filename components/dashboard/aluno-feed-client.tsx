@@ -2,7 +2,7 @@
 
 import type { FeedContentItem } from "@/app/actions/content-items"
 import type { ContentComment } from "@/app/actions/content-items"
-import { recordContentShare, toggleContentLike } from "@/app/actions/content-items"
+import { recordContentShare, toggleContentLike, toggleContentSave } from "@/app/actions/content-items"
 import { ArticleCoverMedia } from "@/components/dashboard/article-cover-media"
 import { CardInlineComments } from "@/components/dashboard/card-inline-comments"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
@@ -100,6 +100,7 @@ function plainText(html: string | null | undefined): string {
 type Props = {
   initialArticles?: FeedContentItem[]
   initialLikedIds?: string[]
+  initialSavedIds?: string[]
   initialCommentPreviews?: Record<string, ContentComment[]>
   viewerUserId?: string | null
 }
@@ -107,11 +108,16 @@ type Props = {
 export function AlunoFeedClient({
   initialArticles = [],
   initialLikedIds = [],
+  initialSavedIds = [],
   initialCommentPreviews = {},
   viewerUserId = null,
 }: Props) {
   const router = useRouter()
-  const [savedItems, setSavedItems] = useState<string[]>([])
+  const [savedMap, setSavedMap] = useState<Record<string, boolean>>(() => {
+    const o: Record<string, boolean> = {}
+    for (const id of initialSavedIds) o[id] = true
+    return o
+  })
   const [likedMap, setLikedMap] = useState<Record<string, boolean>>(() => {
     const o: Record<string, boolean> = {}
     for (const id of initialLikedIds) o[id] = true
@@ -132,8 +138,17 @@ export function AlunoFeedClient({
     }))
   }
 
-  const toggleSave = (id: string) => {
-    setSavedItems((prev) => (prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]))
+  const onSave = async (articleId: string) => {
+    const res = await toggleContentSave(articleId)
+    if (!res.ok) {
+      if (res.error === "Nao autenticado") {
+        toast.message("Entre na conta para salvar")
+      } else {
+        toast.error(res.error)
+      }
+      return
+    }
+    setSavedMap((prev) => ({ ...prev, [articleId]: res.saved }))
   }
 
   const onLike = async (articleId: string) => {
@@ -426,11 +441,11 @@ export function AlunoFeedClient({
                       </div>
                       <button
                         type="button"
-                        onClick={() => toggleSave(item.id)}
-                        className={`transition-colors ${savedItems.includes(item.id) ? "text-[#F59E0B]" : "text-gray-600 hover:text-[#F59E0B]"}`}
+                        onClick={() => onSave(item.id)}
+                        className={`transition-colors ${savedMap[item.id] ? "text-[#F59E0B]" : "text-gray-600 hover:text-[#F59E0B]"}`}
                       >
                         <span className="sr-only">Salvar</span>
-                        <Bookmark className={`h-5 w-5 ${savedItems.includes(item.id) ? "fill-current" : ""}`} />
+                        <Bookmark className={`h-5 w-5 ${savedMap[item.id] ? "fill-current" : ""}`} />
                       </button>
                     </div>
                   </div>

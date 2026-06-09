@@ -1854,6 +1854,59 @@ export async function toggleContentLike(
   }
 }
 
+export async function getMySavesForContentIds(
+  contentIds: string[]
+): Promise<Set<string>> {
+  if (contentIds.length === 0) return new Set()
+  const user = await requireAuthedUser().catch(() => null)
+  if (!user) return new Set()
+
+  const rows = await query<{ content_item_id: string }>(
+    "select content_item_id from public.content_saves where user_id = $1 and content_item_id = any($2::uuid[])",
+    [user.id, contentIds]
+  ).catch(() => [])
+
+  return new Set(rows.map((r) => r.content_item_id))
+}
+
+export async function toggleContentSave(
+  contentItemId: string
+): Promise<
+  | { ok: true; saved: boolean; saveCount: number }
+  | { ok: false; error: string }
+> {
+  const user = await requireAuthedUser().catch(() => null)
+  if (!user) return { ok: false, error: "Nao autenticado" }
+
+  const existing = await queryOne<{ id: string }>(
+    "select id from public.content_saves where content_item_id = $1 and user_id = $2",
+    [contentItemId, user.id]
+  )
+
+  try {
+    if (existing) {
+      await query("delete from public.content_saves where id = $1", [existing.id])
+    } else {
+      await query(
+        "insert into public.content_saves (content_item_id, user_id) values ($1, $2) on conflict do nothing",
+        [contentItemId, user.id]
+      )
+    }
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao salvar" }
+  }
+
+  const row = await queryOne<{ save_count: number }>(
+    "select save_count from public.content_items where id = $1",
+    [contentItemId]
+  )
+
+  revalidatePath("/dashboard/aluno")
+  revalidatePath(`/conteudo/${contentItemId}`)
+
+  return { ok: true, saved: !existing, saveCount: row?.save_count ?? 0 }
+}
+
 export async function getProfessorViewStats(): Promise<{
   totalViews: number
   totalPublications: number
