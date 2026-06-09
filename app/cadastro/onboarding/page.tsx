@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { useRouter } from "next/navigation"
+import { saveOnboardingAnswers } from "@/app/actions/student-planner"
 import { Button } from "@/components/ui/button"
 import { GraduationCap, Target, Clock, Brain, BookOpen, ArrowRight, ArrowLeft, Sparkles } from "lucide-react"
 import { Progress } from "@/components/ui/progress"
@@ -45,6 +46,7 @@ export default function OnboardingPage() {
   const router = useRouter()
   const [currentStep, setCurrentStep] = useState(1)
   const [isGenerating, setIsGenerating] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
   const totalSteps = 4
 
   const [answers, setAnswers] = useState({
@@ -56,15 +58,19 @@ export default function OnboardingPage() {
 
   const progress = (currentStep / totalSteps) * 100
 
-  const handleNext = () => {
+  const handleNext = async () => {
     if (currentStep < totalSteps) {
       setCurrentStep(currentStep + 1)
     } else {
       setIsGenerating(true)
-      // Simulate AI generating study plan
-      setTimeout(() => {
-        router.push("/dashboard/aluno")
-      }, 3000)
+      setSaveError(null)
+      const result = await saveOnboardingAnswers(answers)
+      if (!result.ok) {
+        setIsGenerating(false)
+        setSaveError(result.error)
+        return
+      }
+      router.push("/dashboard/aluno")
     }
   }
 
@@ -281,11 +287,14 @@ export default function OnboardingPage() {
         )}
 
         {/* Navigation */}
-        <div className="flex items-center justify-between mt-12">
+        {saveError && (
+          <p className="mt-6 text-sm text-red-600 text-center">{saveError}</p>
+        )}
+        <div className="flex items-center justify-between mt-6">
           <Button
             variant="ghost"
             onClick={handleBack}
-            disabled={currentStep === 1}
+            disabled={currentStep === 1 || isGenerating}
             className="text-gray-600"
           >
             <ArrowLeft className="mr-2 h-4 w-4" />
@@ -293,7 +302,7 @@ export default function OnboardingPage() {
           </Button>
           <Button
             onClick={handleNext}
-            disabled={!canProceed()}
+            disabled={!canProceed() || isGenerating}
             className="bg-[#10B981] hover:bg-[#059669]"
           >
             {currentStep === totalSteps ? "Gerar meu plano" : "Continuar"}
