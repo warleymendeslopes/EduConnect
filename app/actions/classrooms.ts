@@ -4,6 +4,7 @@ import { del, put } from "@vercel/blob"
 import { randomUUID } from "crypto"
 import { revalidatePath } from "next/cache"
 import { requireAuthedUser } from "@/lib/auth/user"
+import { getProfileAccess, isApprovedProfessor } from "@/lib/auth/profile"
 import { dbPool } from "@/lib/db/pool"
 import { query, queryOne } from "@/lib/db/query"
 import {
@@ -71,12 +72,9 @@ export async function createClassroom(
   const user = await requireAuthedUser().catch(() => null)
   if (!user) return { ok: false, error: "Nao autenticado" }
 
-  const profile = await queryOne<{ user_type: string }>(
-    "select user_type from public.profiles where id = $1",
-    [user.id]
-  )
-  if (profile?.user_type !== "professor") {
-    return { ok: false, error: "Apenas professores podem criar salas" }
+  const profile = await getProfileAccess(user.id)
+  if (!isApprovedProfessor(profile)) {
+    return { ok: false, error: "Apenas professores aprovados podem criar salas" }
   }
 
   const name = input.name.trim()
@@ -334,18 +332,15 @@ export async function listStudentsAcrossClassroomsForProfessor(
     }
   }
 
-  const profile = await queryOne<{ user_type: string }>(
-    "select user_type from public.profiles where id = $1",
-    [user.id]
-  )
+  const profile = await getProfileAccess(user.id)
 
-  if (profile?.user_type !== "professor") {
+  if (!isApprovedProfessor(profile)) {
     return {
       rows: [],
       total: 0,
       page: 1,
       pageSize: PROFESSOR_STUDENTS_DEFAULT_PAGE_SIZE,
-      error: "Apenas professores",
+      error: "Apenas professores aprovados",
     }
   }
 

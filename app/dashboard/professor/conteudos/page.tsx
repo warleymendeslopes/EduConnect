@@ -1,7 +1,11 @@
-import { listMyContentItemsForProfessor } from "@/app/actions/content-items"
+import {
+  listContentCommentPreviews,
+  listMyContentItemsForProfessor,
+} from "@/app/actions/content-items"
 import { ProfessorContentFeed } from "@/components/dashboard/professor-content-feed"
 import { ProfessorFeedSidebar } from "@/components/dashboard/professor-feed-sidebar"
 import { requireAuthedUser } from "@/lib/auth/user"
+import { getProfileAccess, isApprovedProfessor } from "@/lib/auth/profile"
 import { queryOne } from "@/lib/db/query"
 import { ArrowLeft } from "lucide-react"
 import Link from "next/link"
@@ -11,16 +15,18 @@ export default async function ProfessorMeuFeedPage() {
   const user = await requireAuthedUser().catch(() => null)
   if (!user) redirect("/login")
 
-  const profile = await queryOne<{ full_name: string | null; avatar_url: string | null; user_type: string }>(
+  const profile = await queryOne<{ full_name: string | null; avatar_url: string | null; user_type: string | null; professor_verification_status: string | null }>(
     "select full_name, avatar_url, user_type from public.profiles where id = $1",
     [user.id]
   )
 
-  if (profile?.user_type !== "professor") {
+  const access = await getProfileAccess(user.id)
+  if (!isApprovedProfessor(access)) {
     redirect("/dashboard/aluno")
   }
 
   const items = await listMyContentItemsForProfessor()
+  const commentPreviews = await listContentCommentPreviews(items.map((item) => item.id), 2)
   const publishedCount = items.filter((i) => i.status === "published").length
   const draftCount = items.filter((i) => i.status === "draft").length
   const reviewCount = items.filter((i) =>
@@ -49,6 +55,8 @@ export default async function ProfessorMeuFeedPage() {
             authorName={profile?.full_name ?? null}
             authorAvatarUrl={profile?.avatar_url ?? null}
             initialItems={items}
+            initialCommentPreviews={commentPreviews}
+            viewerUserId={user?.id ?? null}
           />
         </div>
 
