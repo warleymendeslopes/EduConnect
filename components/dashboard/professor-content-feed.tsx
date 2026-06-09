@@ -8,6 +8,8 @@ import {
 } from "@/app/actions/content-items"
 import { ContentExerciseSubmissionsDialog } from "@/components/dashboard/content-exercise-submissions-dialog"
 import { ArticleCoverMedia } from "@/components/dashboard/article-cover-media"
+import { CardInlineComments } from "@/components/dashboard/card-inline-comments"
+import type { ContentComment } from "@/app/actions/content-items"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -58,6 +60,8 @@ type Props = {
   authorName: string | null
   authorAvatarUrl: string | null
   initialItems: ProfessorContentListItem[]
+  initialCommentPreviews?: Record<string, ContentComment[]>
+  viewerUserId?: string | null
 }
 
 function initials(name: string | null): string {
@@ -73,6 +77,8 @@ export function ProfessorContentFeed({
   authorName,
   authorAvatarUrl,
   initialItems,
+  initialCommentPreviews = {},
+  viewerUserId = null,
 }: Props) {
   const router = useRouter()
   const items = useMemo(() => initialItems ?? [], [initialItems])
@@ -87,16 +93,23 @@ export function ProfessorContentFeed({
     status: "revisao" | "aguardando_decisao"
   } | null>(null)
   const [likedMap, setLikedMap] = useState<Record<string, boolean>>({})
-  const [counts, setCounts] = useState<Record<string, { likes: number; shares: number }>>(() => {
-    const o: Record<string, { likes: number; shares: number }> = {}
+  const [counts, setCounts] = useState<Record<string, { likes: number; shares: number; comments: number }>>(() => {
+    const o: Record<string, { likes: number; shares: number; comments: number }> = {}
     for (const a of items) {
-      o[a.id] = { likes: a.like_count, shares: a.share_count }
+      o[a.id] = { likes: a.like_count, shares: a.share_count, comments: a.comment_count }
     }
     return o
   })
 
   const toggleSave = (id: string) => {
     setSavedItems((prev) => (prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]))
+  }
+
+  const updateCommentCount = (id: string, count: number) => {
+    setCounts((prev) => ({
+      ...prev,
+      [id]: { ...(prev[id] ?? { likes: 0, shares: 0, comments: 0 }), comments: count },
+    }))
   }
 
   const onLike = async (articleId: string) => {
@@ -218,7 +231,7 @@ export function ProfessorContentFeed({
           </div>
         ) : (
           items.map((item) => {
-            const c = counts[item.id] ?? { likes: item.like_count, shares: item.share_count }
+            const c = counts[item.id] ?? { likes: item.like_count, shares: item.share_count, comments: item.comment_count }
             const liked = !!likedMap[item.id]
             const isExercise = item.type === "exercise"
             const isAssessment = item.type === "assessment"
@@ -460,10 +473,16 @@ export function ProfessorContentFeed({
                         />
                         <span className="text-sm">{c.likes}</span>
                       </button>
-                      <span className="flex items-center gap-1 text-gray-400 text-sm">
+                      <button
+                        type="button"
+                        className="flex items-center gap-1 text-gray-400 hover:text-[#1D4ED8] transition-colors text-sm"
+                        onClick={() => {
+                          document.getElementById(`comment-input-${item.id}`)?.focus()
+                        }}
+                      >
                         <MessageCircle className="h-5 w-5" />
-                        <span>0</span>
-                      </span>
+                        <span>{c.comments}</span>
+                      </button>
                       <button
                         type="button"
                         className="text-gray-600 hover:text-[#1D4ED8] transition-colors"
@@ -482,6 +501,14 @@ export function ProfessorContentFeed({
                     </button>
                   </div>
                 </div>
+
+                <CardInlineComments
+                  contentItemId={item.id}
+                  initialComments={initialCommentPreviews[item.id] ?? []}
+                  initialCommentCount={c.comments}
+                  viewerUserId={viewerUserId}
+                  onCountChange={(count) => updateCommentCount(item.id, count)}
+                />
 
                 <div className="px-4 pb-4">
                   <Button

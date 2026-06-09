@@ -1,6 +1,7 @@
 import {
   getContentItemById,
   getMyLikesForContentIds,
+  listContentComments,
   recordContentView,
 } from "@/app/actions/content-items"
 import {
@@ -23,6 +24,7 @@ import Link from "next/link"
 import { notFound } from "next/navigation"
 import { DicaMediaCarousel } from "@/components/dashboard/dica-media-carousel"
 import { ConteudoEngagement } from "./conteudo-engagement"
+import { ContentComments } from "./content-comments"
 import { ConteudoExercisePublic } from "./conteudo-exercise-public"
 
 type Props = { params: Promise<{ id: string }> }
@@ -96,6 +98,9 @@ export default async function ConteudoPublicoPage({ params }: Props) {
     recordContentView(id),
   ])
   const initialLiked = likedSet.has(id)
+  const commentsRes = await listContentComments(id)
+  const initialComments = commentsRes.ok ? commentsRes.comments : []
+  const viewerUserId = commentsRes.ok ? commentsRes.viewerUserId : null
 
   const { item, author } = res
   const disciplina = item.settings?.disciplina
@@ -169,7 +174,17 @@ export default async function ConteudoPublicoPage({ params }: Props) {
                 contentItemId={item.id}
                 initialLikeCount={item.like_count}
                 initialShareCount={item.share_count}
+                initialCommentCount={item.comment_count}
                 initialLiked={initialLiked}
+              />
+            </div>
+
+            <div id="comentarios">
+              <ContentComments
+                contentItemId={item.id}
+                initialComments={initialComments}
+                initialCommentCount={item.comment_count}
+                viewerUserId={viewerUserId}
               />
             </div>
           </div>
@@ -241,7 +256,17 @@ export default async function ConteudoPublicoPage({ params }: Props) {
                 contentItemId={item.id}
                 initialLikeCount={item.like_count}
                 initialShareCount={item.share_count}
+                initialCommentCount={item.comment_count}
                 initialLiked={initialLiked}
+              />
+            </div>
+
+            <div id="comentarios">
+              <ContentComments
+                contentItemId={item.id}
+                initialComments={initialComments}
+                initialCommentCount={item.comment_count}
+                viewerUserId={viewerUserId}
               />
             </div>
           </div>
@@ -390,7 +415,17 @@ export default async function ConteudoPublicoPage({ params }: Props) {
               contentItemId={item.id}
               initialLikeCount={item.like_count}
               initialShareCount={item.share_count}
+              initialCommentCount={item.comment_count}
               initialLiked={initialLiked}
+            />
+          </div>
+
+          <div id="comentarios">
+            <ContentComments
+              contentItemId={item.id}
+              initialComments={initialComments}
+              initialCommentCount={item.comment_count}
+              viewerUserId={viewerUserId}
             />
           </div>
         </div>

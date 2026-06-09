@@ -8,9 +8,11 @@ node_modules
 npm-debug.log*
 *.tsbuildinfo
 .DS_Store
+client_secret_*.json
 
 # Variaveis de ambiente (passadas em runtime pelo compose)
 .env
+.env*
 .env*.local
 .env.docker
 .env.docker.example

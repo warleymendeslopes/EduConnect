@@ -2,7 +2,7 @@
 
 import { recordContentShare, toggleContentLike } from "@/app/actions/content-items"
 import { Button } from "@/components/ui/button"
-import { Heart, Share2 } from "lucide-react"
+import { Heart, MessageCircle, Share2 } from "lucide-react"
 import { useState } from "react"
 import { toast } from "sonner"
 
@@ -10,6 +10,7 @@ type Props = {
   contentItemId: string
   initialLikeCount: number
   initialShareCount: number
+  initialCommentCount: number
   initialLiked?: boolean
 }
 
@@ -17,6 +18,7 @@ export function ConteudoEngagement({
   contentItemId,
   initialLikeCount,
   initialShareCount,
+  initialCommentCount,
   initialLiked = false,
 }: Props) {
   const [likes, setLikes] = useState(initialLikeCount)
@@ -83,6 +85,12 @@ export function ConteudoEngagement({
       <Button type="button" variant="outline" size="sm" className="gap-2" onClick={() => void onShare()}>
         <Share2 className="h-4 w-4" />
         Partilhar ({shares})
+      </Button>
+      <Button type="button" variant="outline" size="sm" className="gap-2" asChild>
+        <a href="#comentarios">
+          <MessageCircle className="h-4 w-4" />
+          {initialCommentCount}
+        </a>
       </Button>
     </div>
   )

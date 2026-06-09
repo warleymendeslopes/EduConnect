@@ -1,4 +1,7 @@
-import { listMyContentItemsForProfessor } from "@/app/actions/content-items"
+import {
+  listContentCommentPreviews,
+  listMyContentItemsForProfessor,
+} from "@/app/actions/content-items"
 import { ProfessorContentFeed } from "@/components/dashboard/professor-content-feed"
 import { ProfessorFeedSidebar } from "@/components/dashboard/professor-feed-sidebar"
 import { requireAuthedUser } from "@/lib/auth/user"
@@ -23,6 +26,7 @@ export default async function ProfessorMeuFeedPage() {
   }
 
   const items = await listMyContentItemsForProfessor()
+  const commentPreviews = await listContentCommentPreviews(items.map((item) => item.id), 2)
   const publishedCount = items.filter((i) => i.status === "published").length
   const draftCount = items.filter((i) => i.status === "draft").length
   const reviewCount = items.filter((i) =>
@@ -51,6 +55,8 @@ export default async function ProfessorMeuFeedPage() {
             authorName={profile?.full_name ?? null}
             authorAvatarUrl={profile?.avatar_url ?? null}
             initialItems={items}
+            initialCommentPreviews={commentPreviews}
+            viewerUserId={user?.id ?? null}
           />
         </div>
 
