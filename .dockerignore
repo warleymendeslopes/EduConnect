@@ -1,0 +1,25 @@
+node_modules
+.next
+.git
+.idea
+.vercel
+.snowflake
+.v0-trash
+npm-debug.log*
+*.tsbuildinfo
+.DS_Store
+
+# Variaveis de ambiente (passadas em runtime pelo compose)
+.env
+.env*.local
+.env.docker
+.env.docker.example
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# Docs
+README.md
+docs

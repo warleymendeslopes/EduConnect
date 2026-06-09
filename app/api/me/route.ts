@@ -9,6 +9,8 @@ type ProfileRow = {
   avatar_url: string | null
   user_type: string | null
   professor_verification_status: string | null
+  cover_url: string | null
+  profile_visibility: "public" | "private"
 }
 
 export async function GET() {
@@ -19,7 +21,10 @@ export async function GET() {
   }
 
   const profile = await queryOne<ProfileRow>(
-    "select full_name, avatar_url, user_type, professor_verification_status from public.profiles where id = $1",
+    `select full_name, avatar_url, cover_url, user_type, professor_verification_status,
+            coalesce(profile_visibility, 'private') as profile_visibility
+       from public.profiles
+      where id = $1`,
     [userId]
   )
 

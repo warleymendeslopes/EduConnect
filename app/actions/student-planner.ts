@@ -512,3 +512,43 @@ export async function togglePersonalPlannerTaskDone(
   revalidatePath(PLAN_PATH)
   return { ok: true }
 }
+
+export async function getOnboardingStatus(): Promise<{ completed: boolean }> {
+  const user = await requireAuthedUser().catch(() => null)
+  if (!user) return { completed: false }
+
+  const row = await queryOne<{ student_id: string }>(
+    "select student_id from public.student_onboarding_answers where student_id = $1",
+    [user.id]
+  ).catch(() => null)
+
+  return { completed: row != null }
+}
+
+export async function saveOnboardingAnswers(answers: {
+  objetivo: string
+  tempo: string
+  dificuldades: string[]
+  estilo: string
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  const user = await requireAuthedUser().catch(() => null)
+  if (!user) return { ok: false, error: "Nao autenticado" }
+
+  try {
+    await query(
+      `insert into public.student_onboarding_answers
+         (student_id, goal, daily_time, difficult_subjects, learning_style, updated_at)
+       values ($1, $2, $3, $4, $5, now())
+       on conflict (student_id) do update
+         set goal               = excluded.goal,
+             daily_time         = excluded.daily_time,
+             difficult_subjects = excluded.difficult_subjects,
+             learning_style     = excluded.learning_style,
+             updated_at         = now()`,
+      [user.id, answers.objetivo, answers.tempo, answers.dificuldades, answers.estilo]
+    )
+    return { ok: true }
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Erro ao salvar" }
+  }
+}

@@ -15,6 +15,7 @@ type DbUser = {
   id: string
   email: string
   password_hash: string | null
+  user_type: string | null
 }
 
 const providers = [
@@ -29,7 +30,10 @@ const providers = [
 
       const { email, password } = parsed.data
       const user = await queryOne<DbUser>(
-        "select id, email, password_hash from public.users where email = $1",
+        `select u.id, u.email, u.password_hash, p.user_type
+           from public.users u
+           left join public.profiles p on p.id = u.id
+          where u.email = $1`,
         [email.toLowerCase()]
       )
       if (!user?.password_hash) return null
@@ -37,7 +41,7 @@ const providers = [
       const ok = await bcrypt.compare(password, user.password_hash)
       if (!ok) return null
 
-      return { id: user.id, email: user.email }
+      return { id: user.id, email: user.email, userType: user.user_type ?? null }
     },
   }),
 ]
@@ -82,17 +86,25 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
 
       user.id = dbUser.id
       user.email = dbUser.email
+      const profileRow = await queryOne<{ user_type: string | null }>(
+        "select user_type from public.profiles where id = $1",
+        [dbUser.id]
+      )
+      ;(user as any).userType = profileRow?.user_type ?? null
       return true
     },
     jwt: async ({ token, user }) => {
       if (user?.id) token.sub = String(user.id)
       if (user?.email) token.email = user.email
+      // Persiste o tipo de usuario no token (apenas no login, quando `user` existe).
+      if (user) (token as any).userType = (user as any).userType ?? null
       return token
     },
     session: async ({ session, token }) => {
       if (session.user && token.sub) {
         // next-auth types keep id optional; attach for server usage.
         ;(session.user as any).id = token.sub
+        ;(session.user as any).userType = (token as any).userType ?? null
       }
       return session
     },
