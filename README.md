@@ -312,4 +312,3 @@ Repositorio remoto configurado:
 ```text
 git@github.com:warleymendeslopes/EduConnect.git
 ```
-
