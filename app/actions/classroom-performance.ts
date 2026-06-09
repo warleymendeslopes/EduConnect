@@ -1,6 +1,7 @@
 "use server"
 
 import { requireAuthedUser } from "@/lib/auth/user"
+import { getProfileAccess, isApprovedProfessor } from "@/lib/auth/profile"
 import { query, queryOne } from "@/lib/db/query"
 import { parseExamFromSettings } from "@/lib/activities/exam"
 import type { ClassroomActivityRow } from "@/lib/activities/types"
@@ -578,17 +579,14 @@ export async function getProfessorStudentOverview(
     return { studentId, fullName: null, classrooms: [], error: "Nao autenticado" }
   }
 
-  const profile = await queryOne<{ user_type: string }>(
-    "select user_type from public.profiles where id = $1",
-    [user.id]
-  )
+  const profile = await getProfileAccess(user.id)
 
-  if (profile?.user_type !== "professor") {
+  if (!isApprovedProfessor(profile)) {
     return {
       studentId,
       fullName: null,
       classrooms: [],
-      error: "Apenas professores",
+      error: "Apenas professores aprovados",
     }
   }
 
